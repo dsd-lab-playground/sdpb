@@ -1,4 +1,5 @@
 #include "Compute_S_Context.hxx"
+#include "lab_guard_bits.hxx"
 #include "sdp_solve/Block_Matrix/Block_Matrix.hxx"
 #include "sdp_solve/SDP_Solver/run/bigint_syrk/Matrix_Normalizer.hxx"
 #include "sdpa_solve/SDP.hxx"
@@ -70,6 +71,106 @@ namespace Sdpb::Sdpa
                                           get_allocated_bytes(L_X_inv));
         print_allocation_message_per_node(env, "L_Y",
                                           get_allocated_bytes(L_Y));
+      }
+
+    // lab (bfss #77): LAB_GUARD_BITS=<g>: power-of-2 fixed point with g
+    // guard bits instead of the 2-norm normalization (lab_guard_bits.hxx)
+    const int guard = lab::guard_bits();
+    if(guard > 0)
+      {
+        const int fp_bits = bits + guard;
+        std::vector<std::vector<int>> L_X_inv_rows, L_Y_cols;
+        for(auto &block : L_X_inv.blocks)
+          {
+            L_X_inv_rows.push_back(
+              lab::pow2_shifts(block, true, true, fp_bits));
+            lab::apply_shifts(block, L_X_inv_rows.back(), {}, true, 1);
+          }
+        for(auto &block : L_Y.blocks)
+          {
+            L_Y_cols.push_back(lab::pow2_shifts(block, false, true, fp_bits));
+            lab::apply_shifts(block, {}, L_Y_cols.back(), true, 1);
+          }
+        ctx.compute_residues(L_X_inv, ctx.L_X_inv_residues, block_timings_ms);
+        ctx.compute_residues(L_Y, ctx.L_Y_residues, block_timings_ms);
+        L_timer.stop();
+        Scoped_Timer G_timer(timers, "G");
+        for(const auto &p_range :
+            split_range(El::IR(0, primal_dimension), ctx.cfg.split_factor))
+          {
+            const size_t p_begin = p_range.beg;
+            const size_t p_end = p_range.end;
+            Scoped_Timer p_timer(timers,
+                                 El::BuildString("p_", p_begin, "_", p_end));
+            std::vector<Block_Diagonal_Matrix> G;
+            G.reserve(p_end - p_begin);
+            G.insert(G.end(), sdp.sdp_blocks_F.begin() + p_begin,
+                     sdp.sdp_blocks_F.begin() + p_end);
+            for(const auto side : {El::LEFT, El::RIGHT})
+              {
+                // left: L_X_inv rows x G columns; right: G rows x L_Y columns
+                std::vector<std::vector<std::vector<int>>> G_shifts(G.size());
+                {
+                  Scoped_Timer norm_timer(timers, "normalize_G");
+                  for(size_t v = 0; v < G.size(); ++v)
+                    for(auto &block : G[v].blocks)
+                      {
+                        const bool rows = side == El::RIGHT;
+                        G_shifts[v].push_back(
+                          lab::pow2_shifts(block, rows, false, fp_bits));
+                        if(rows)
+                          lab::apply_shifts(block, G_shifts[v].back(), {},
+                                            false, 1);
+                        else
+                          lab::apply_shifts(block, {}, G_shifts[v].back(),
+                                            false, 1);
+                      }
+                }
+                {
+                  Scoped_Timer compute_residues_timer(timers,
+                                                      "compute_residues");
+                  auto &G_residues = ctx.G_residues(
+                    p_end - p_begin,
+                    side == El::LEFT ? El::HORIZONTAL : El::VERTICAL);
+                  ctx.compute_residues(G, G_residues, block_timings_ms);
+                  compute_residues_timer.stop();
+                  ctx.trmm(side, uplo, orientation, diag,
+                           side == El::LEFT ? ctx.L_X_inv_residues
+                                            : ctx.L_Y_residues,
+                           G_residues, G, verbosity, timers,
+                           block_timings_ms);
+                }
+                Scoped_Timer remove_normalization_timer(
+                  timers, "remove_normalization");
+                for(size_t v = 0; v < G.size(); ++v)
+                  for(size_t b = 0; b < G[v].blocks.size(); ++b)
+                    {
+                      auto &block = G[v].blocks[b];
+                      if(side == El::LEFT)
+                        lab::apply_shifts(block, L_X_inv_rows[b],
+                                          G_shifts[v][b], false, -1);
+                      else
+                        lab::apply_shifts(block, G_shifts[v][b], L_Y_cols[b],
+                                          false, -1);
+                    }
+              }
+            Scoped_Timer reshape_timer(timers, "reshape");
+            for(size_t block = 0; block < block_info.num_blocks_local();
+                ++block)
+              {
+                auto &P_block = result.blocks.at(block);
+                for(size_t p = p_begin; p < p_end; ++p)
+                  {
+                    const auto &G_p_block = G.at(p - p_begin).blocks.at(block);
+                    const int vec_height = P_block.Height();
+                    auto vec_G_p_view
+                      = El::View(P_block, El::Range<int>(0, vec_height),
+                                 El::Range<int>(p, p + 1));
+                    El::Reshape(vec_height, 1, G_p_block, vec_G_p_view);
+                  }
+              }
+          }
+        return result;
       }
 
     // Make L_X_inv and L_Y bigint matrices

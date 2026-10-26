@@ -1,4 +1,5 @@
 #include "Initialize_P_Config.hxx"
+#include "lab_guard_bits.hxx"
 
 #include "sdpb_util/assert.hxx"
 #include "sdpb_util/memory_estimates.hxx"
@@ -96,7 +97,8 @@ namespace Sdpb::Sdpa
   }
   Fmpz_Comb Initialize_P_Config::comb() const
   {
-    const mp_limb_t bits = precision;
+    // lab (bfss #77): LAB_GUARD_BITS=<g> widens the fixed point by g bits
+    const mp_limb_t bits = precision + lab::guard_bits();
     // Max number of additions during trmm computation.
     const size_t max_additions = max_block_dim;
     // Allow negative values

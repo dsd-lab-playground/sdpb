@@ -1,4 +1,5 @@
 #include "Initialize_P_Context.hxx"
+#include "lab_guard_bits.hxx"
 
 #include "bigint_trmm/blas_jobs/create_blas_job_schedule.hxx"
 #include "sdp_solve/Block_Matrix/Block_Diagonal_Matrix.hxx"
@@ -255,7 +256,7 @@ namespace Sdpb::Sdpa
     if(!blas_conversions_context)
       blas_conversions_context
         = std::make_unique<Lab_Blas_Conversions::Context>(
-          comb, cfg.precision + 2);
+          comb, cfg.precision + lab::guard_bits() + 2);
     return *blas_conversions_context;
   }
 
