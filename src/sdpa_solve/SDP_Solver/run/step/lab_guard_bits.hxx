@@ -120,3 +120,69 @@ namespace Sdpb::Sdpa::lab
       }
   }
 }
+
+namespace Sdpb::Sdpa::lab
+{
+  // LAB_L_INV_EXTRA_BITS=<e> (experimental, bfss #77): for blocks held by a
+  // single rank, L^-1 is computed by forward substitution in mpf at
+  // precision + e bits from the working-precision L, then rounded to the
+  // working precision (instead of El::TriangularInverse at the working
+  // precision). A diagnostic of where S loses accuracy; blocks spread over
+  // several ranks keep El::TriangularInverse.
+  inline int l_inv_extra_bits()
+  {
+    static const int value = [] {
+      const char *env = std::getenv("LAB_L_INV_EXTRA_BITS");
+      return env == nullptr ? 0 : std::max(0, std::atoi(env));
+    }();
+    return value;
+  }
+
+  // Returns false (block untouched) if the block is not held by one rank.
+  inline bool lower_triangular_inverse_extra(El::DistMatrix<El::BigFloat> &L,
+                                             const int extra_bits)
+  {
+    const int n = L.Height();
+    if(L.LocalHeight() != n || L.LocalWidth() != L.Width())
+      return false;
+    const mp_bitcnt_t prec = El::gmp::Precision() + extra_bits;
+    auto &A = L.Matrix();
+    std::vector<mpf_t> Lh(size_t(n) * n), X(size_t(n) * n);
+    for(int j = 0; j < n; ++j)
+      for(int i = 0; i < n; ++i)
+        {
+          mpf_init2(Lh[i + size_t(n) * j], prec);
+          mpf_init2(X[i + size_t(n) * j], prec);
+          if(i >= j)
+            mpf_set(Lh[i + size_t(n) * j], A(i, j).gmp_float.get_mpf_t());
+        }
+    mpf_t acc, t;
+    mpf_init2(acc, prec);
+    mpf_init2(t, prec);
+    for(int j = 0; j < n; ++j)
+      {
+        mpf_ui_div(X[j + size_t(n) * j], 1, Lh[j + size_t(n) * j]);
+        for(int i = j + 1; i < n; ++i)
+          {
+            mpf_set_ui(acc, 0);
+            for(int k = j; k < i; ++k)
+              {
+                mpf_mul(t, Lh[i + size_t(n) * k], X[k + size_t(n) * j]);
+                mpf_add(acc, acc, t);
+              }
+            mpf_div(acc, acc, Lh[i + size_t(n) * i]);
+            mpf_neg(X[i + size_t(n) * j], acc);
+          }
+      }
+    for(int j = 0; j < n; ++j)
+      for(int i = j; i < n; ++i)
+        mpf_set(A(i, j).gmp_float.get_mpf_t(), X[i + size_t(n) * j]);
+    mpf_clear(acc);
+    mpf_clear(t);
+    for(auto &v : Lh)
+      mpf_clear(v);
+    for(auto &v : X)
+      mpf_clear(v);
+    return true;
+  }
+}

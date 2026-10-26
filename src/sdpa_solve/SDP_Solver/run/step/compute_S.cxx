@@ -62,6 +62,11 @@ namespace Sdpb::Sdpa
     auto L_X_inv = X_cholesky;
     for(auto &block : L_X_inv.blocks)
       {
+        // lab (bfss #77): LAB_L_INV_EXTRA_BITS (experimental, lab_guard_bits.hxx)
+        if(lab::l_inv_extra_bits() > 0
+           && lab::lower_triangular_inverse_extra(block,
+                                                  lab::l_inv_extra_bits()))
+          continue;
         El::TriangularInverse(uplo, diag, block);
       }
     auto L_Y = Y_cholesky;
