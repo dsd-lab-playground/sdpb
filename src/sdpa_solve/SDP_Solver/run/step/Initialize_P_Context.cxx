@@ -1,6 +1,8 @@
 #include "Initialize_P_Context.hxx"
 
 #include "bigint_trmm/blas_jobs/create_blas_job_schedule.hxx"
+#include <cstdlib>
+#include <optional>
 #include "sdp_solve/Block_Matrix/Block_Diagonal_Matrix.hxx"
 #include "sdpb_util/bigint_shared_memory/fmpz/residues.hxx"
 
@@ -299,12 +301,46 @@ namespace Sdpb::Sdpa
         widths.push_back(stacked_matrix.Width());
       }
 
-    // TODO cache it
-    const auto blas_job_schedule = Trmm::create_blas_job_schedule(
-      side, uplo, orientation, diag, shared_memory_comm.Size(),
-      cfg.num_primes(), heights, widths, verbosity);
+    // The schedule depends on shapes and operation flags, never matrix values.
+    // Opt-in prototype: include every scheduling input in the key and bound
+    // retained schedules so a process solving many different SDPs cannot grow
+    // this cache indefinitely. Nothing is shared across MPI processes/threads.
+    using Schedule = Blas_Job_Schedule<Trmm::Blas_Job>;
+    using Key = std::tuple<El::LeftOrRight, El::UpperOrLower, El::Orientation,
+                           El::UnitOrNonUnit, size_t, size_t,
+                           std::vector<size_t>, std::vector<size_t>>;
+    static thread_local std::map<Key, Schedule> schedule_cache;
+    std::optional<Schedule> fresh_schedule;
+    const Schedule *schedule;
+    Scoped_Timer schedule_timer(timers, "schedule");
+    const auto *enable_cache = std::getenv("SDPB_TRMM_SCHEDULE_CACHE");
+    const bool cache_enabled = enable_cache && std::string(enable_cache) == "1";
+    const auto make_schedule = [&]() {
+      return Trmm::create_blas_job_schedule(
+        side, uplo, orientation, diag, shared_memory_comm.Size(),
+        cfg.num_primes(), heights, widths, verbosity);
+    };
+    if(cache_enabled)
+      {
+        const Key key{side, uplo, orientation, diag, shared_memory_comm.Size(),
+                      cfg.num_primes(), heights, widths};
+        auto it = schedule_cache.find(key);
+        if(it == schedule_cache.end())
+          {
+            if(schedule_cache.size() >= 16)
+              schedule_cache.clear();
+            it = schedule_cache.emplace(key, make_schedule()).first;
+          }
+        schedule = &it->second;
+      }
+    else
+      {
+        fresh_schedule.emplace(make_schedule());
+        schedule = &*fresh_schedule;
+      }
+    schedule_timer.stop();
 
-    do_blas_jobs(blas_job_schedule, L_window, G_window, timers,
+    do_blas_jobs(*schedule, L_window, G_window, timers,
                  block_timings_ms);
     restore_from_residues(G_window, G, timers, block_timings_ms);
   }
