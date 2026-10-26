@@ -444,7 +444,6 @@ SDP_Solver_Terminate_Reason SDP_Solver::run(
            timers, block_timings_ms, Q_cond_number, max_block_cond_number,
            max_block_cond_number_name);
 
-      num_steps = iteration;
       if(verbosity >= Verbosity::trace && El::mpi::Rank() == 0)
         {
           El::Print(block_timings_ms, "block_timings, ms:");
@@ -469,6 +468,7 @@ SDP_Solver_Terminate_Reason SDP_Solver::run(
             = SDP_Solver_Terminate_Reason::MaxComplementarityExceeded;
           break;
         }
+      num_steps = iteration;
       Scoped_Timer print_iteration_timer(timers, "print_iteration");
       print_iteration(iterations_json_path, iteration, mu, primal_step_length,
                       dual_step_length, beta_corrector, *this,
