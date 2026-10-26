@@ -16,7 +16,9 @@
 
 #include <El.hpp>
 
+#include <climits>
 #include <cstdlib>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -26,6 +28,17 @@ namespace Sdpb::Sdpa::lab
   {
     static const int value = [] {
       const char *env = std::getenv("LAB_GUARD_BITS");
+      return env == nullptr ? 0 : std::max(0, std::atoi(env));
+    }();
+    return value;
+  }
+
+  // LAB_SYRK_GUARD_BITS=<g>: the same for syrk's fixed point of P
+  // (normalize_P), used by syrk_Q and Bigint_Syrk_Config::comb
+  inline int syrk_guard_bits()
+  {
+    static const int value = [] {
+      const char *env = std::getenv("LAB_SYRK_GUARD_BITS");
       return env == nullptr ? 0 : std::max(0, std::atoi(env));
     }();
     return value;

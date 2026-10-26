@@ -4,6 +4,7 @@
 #include "sdp_solve/SDP_Solver/run/bigint_syrk/Matrix_Normalizer.hxx"
 #include "sdp_solve/memory_estimates.hxx"
 #include "sdpb_util/Timers/Timers.hxx"
+#include "sdpa_solve/SDP_Solver/run/step/lab_guard_bits.hxx"
 
 // schur_off_diagonal = L^{-1} B
 void initialize_schur_off_diagonal(
@@ -70,6 +71,48 @@ void syrk_Q(const Environment &env, Block_Matrix &schur_off_diagonal,
             El::Matrix<int32_t> &block_timings_ms, const Verbosity verbosity)
 {
   Scoped_Timer syrk_timer(timers, "syrk");
+
+  // lab (bfss #77), LAB_SYRK_GUARD_BITS=<g>: columns of P scaled by powers of
+  // 2 with g guard bits instead of divided by their 2-norms (lab_guard_bits.hxx)
+  if(const int guard = Sdpb::Sdpa::lab::syrk_guard_bits(); guard > 0)
+    {
+      namespace lab = Sdpb::Sdpa::lab;
+      const int fp_bits = El::gmp::Precision() + guard;
+      const int width = schur_off_diagonal.width;
+      std::vector<int> e(width, std::numeric_limits<int>::min());
+      {
+        Scoped_Timer normalizer_timer(timers, "normalize_P");
+        for(const auto &block : schur_off_diagonal.blocks)
+          for(int jLoc = 0; jLoc < block.LocalWidth(); ++jLoc)
+            {
+              const int j = block.GlobalCol(jLoc);
+              for(int iLoc = 0; iLoc < block.LocalHeight(); ++iLoc)
+                {
+                  const long E = lab::exponent_of(block.GetLocalCRef(iLoc, jLoc));
+                  if(E > e[j])
+                    e[j] = int(E);
+                }
+            }
+        El::mpi::AllReduce(e.data(), width, El::mpi::MAX, El::mpi::COMM_WORLD);
+      }
+      std::vector<int> shifts(width, 0);
+      for(int j = 0; j < width; ++j)
+        if(e[j] != std::numeric_limits<int>::min())
+          shifts[j] = fp_bits - e[j];
+      {
+        Scoped_Timer normalizer_timer(timers, "shift_P");
+        for(auto &block : schur_off_diagonal.blocks)
+          lab::apply_shifts(block, {}, shifts, false, 1);
+      }
+      constexpr auto uplo = El::UPPER;
+      bigint_syrk_context.bigint_syrk_blas(uplo, schur_off_diagonal.blocks, Q,
+                                           timers, block_timings_ms);
+      Scoped_Timer restore_timer(timers, "restore_P_Q");
+      for(auto &block : schur_off_diagonal.blocks)
+        lab::apply_shifts(block, {}, shifts, false, -1);
+      lab::apply_shifts(Q, shifts, shifts, false, -1);
+      return;
+    }
 
   // Normalize P columns and multiply by 2^N
   Scoped_Timer normalizer_timer(timers, "normalize_P");

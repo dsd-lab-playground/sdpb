@@ -1,3 +1,4 @@
+#include "sdpa_solve/SDP_Solver/run/step/lab_guard_bits.hxx"
 #include "Bigint_Syrk_Config.hxx"
 
 // Helper functions. TODO move elsewhere and reuse?
@@ -40,7 +41,8 @@ Bigint_Syrk_Config::Bigint_Syrk_Config(
 {}
 Fmpz_Comb Bigint_Syrk_Config::comb() const
 {
-  const mp_limb_t bits = precision;
+  // lab (bfss #77): LAB_SYRK_GUARD_BITS=<g> widens the fixed point by g bits
+  const mp_limb_t bits = precision + Sdpb::Sdpa::lab::syrk_guard_bits();
   // Max number of additions during syrk computation
   const size_t max_additions = input_height;
   // Allow negative values

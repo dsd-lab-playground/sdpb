@@ -1,3 +1,4 @@
+#include "sdpa_solve/SDP_Solver/run/step/lab_guard_bits.hxx"
 #include "../BigInt_Shared_Memory_Syrk_Context.hxx"
 #include "sdpb_util/bigint_shared_memory/fmpz/Fmpz_BigInt.hxx"
 #include "sdpb_util/bigint_shared_memory/fmpz/residues.hxx"
@@ -289,7 +290,7 @@ void BigInt_Shared_Memory_Syrk_Context::lab_compute_residues_contiguous(
       {
         if(!lab_blas_context)
           lab_blas_context = std::make_unique<Lab_Blas_Conversions::Context>(
-            comb, El::gmp::Precision() + 2);
+            comb, El::gmp::Precision() + Sdpb::Sdpa::lab::syrk_guard_bits() + 2);
         constexpr size_t batch = Lab_Blas_Conversions::batch_size;
         Lab_Blas_Conversions::Workspace work(*lab_blas_context);
         std::vector<El::BigFloat> values(batch);
