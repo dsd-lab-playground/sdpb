@@ -2,6 +2,8 @@
 
 #include <boost/program_options/parsers.hpp>
 
+#include <rapidjson/document.h>
+
 #include <fstream>
 #include <sstream>
 
@@ -232,6 +234,189 @@ TEST_CASE("resident")
           REQUIRE(read_file(out_file / name) == read_file(out_res / name));
         }
       // Generation k in both: one checkpoint per solve
+      const auto ck_f = output_dir / ("ck_file_" + std::to_string(k));
+      const auto ck_r = output_dir / ("ck_res_" + std::to_string(k));
+      const auto files = checkpoint_files(ck_f, k);
+      REQUIRE(files.size() == num_procs);
+      REQUIRE(checkpoint_files(ck_r, k) == files);
+      for(const auto &name : files)
+        {
+          CAPTURE(name);
+          REQUIRE(read_file(ck_f / name) == read_file(ck_r / name));
+        }
+    }
+}
+
+TEST_CASE("resident_family")
+{
+  INFO("sdpb --controlDir: a parametric block (load_family, "
+       "set_coefficients) with an exact contraction equals the file route");
+  // Block 0 is lambda^T G lambda >= 0, a 1x1 constant constraint with a 2x2 G:
+  // G_00 = unit (the normalization), G_01 = 0, G_11 = -unit. With unit
+  // lambdas, (1,0) and (0,1), the block is G_00 or G_11 exactly, so the
+  // resident's contraction must equal pmp2sdp's conversion of that component.
+  const int num_procs = 8;
+  const int precision = 768;
+  const auto dir_A = Test_Config::test_data_dir / "end-to-end_tests"
+                     / "SingletScalarAllowed_test_nmax6" / "dual_feasible_jump"
+                     / "input" / "json";
+  const std::string norm_file
+    = "mat__jiutIpgPLv34k9-62shY0ddvi3BmZGH3YmLnKhtYAE.json";
+
+  Test_Case_Runner runner("resident_family");
+  const auto &output_dir = runner.output_dir;
+  fs::create_directories(output_dir);
+
+  // The normalization strings, read as text
+  std::vector<std::string> unit;
+  {
+    rapidjson::Document doc;
+    doc.Parse(read_file(dir_A / norm_file).c_str());
+    REQUIRE(doc.HasMember("normalization"));
+    for(const auto &v : doc["normalization"].GetArray())
+      unit.emplace_back(v.GetString());
+  }
+  const auto const_pmp = [](const std::vector<std::string> &vec) {
+    std::string text = "{\"PositiveMatrixWithPrefactorArray\": [{\"prefactor\": "
+                       "{\"base\": \"1\", \"constant\": \"1\", \"poles\": []}, "
+                       "\"polynomials\": [[[";
+    for(size_t i = 0; i < vec.size(); ++i)
+      text += (i == 0 ? "[\"" : ", [\"") + vec[i] + "\"]";
+    return text + "]]]}]}";
+  };
+  std::vector<std::string> minus_unit, zero(unit.size(), "0");
+  for(const auto &x : unit)
+    minus_unit.push_back(x.rfind('-', 0) == 0 ? x.substr(1) : "-" + x);
+  const auto comp_00 = fs::absolute(output_dir / "comp_00.json");
+  const auto comp_01 = fs::absolute(output_dir / "comp_01.json");
+  const auto comp_11 = fs::absolute(output_dir / "comp_11.json");
+  write_file(comp_00, const_pmp(unit));
+  write_file(comp_01, const_pmp(zero));
+  write_file(comp_11, const_pmp(minus_unit));
+
+  // The base problem (all its files), with the family block first
+  std::vector<std::string> common;
+  for(const auto &entry : fs::directory_iterator(dir_A))
+    common.push_back(fs::absolute(entry.path()).string());
+  std::sort(common.begin(), common.end());
+  const auto write_nsv = [&](const fs::path &path, const fs::path &first) {
+    std::string text = first.string() + '\0';
+    for(const auto &file : common)
+      text += file + '\0';
+    write_file(path, text);
+  };
+  const auto nsv_X = output_dir / "pmp_X.nsv";
+  const auto nsv_Y = output_dir / "pmp_Y.nsv";
+  write_nsv(nsv_X, comp_00);
+  write_nsv(nsv_Y, comp_11);
+  const auto sdp_X = output_dir / "sdp_X";
+  const auto sdp_Y = output_dir / "sdp_Y";
+  for(const auto &[nsv, sdp] :
+      {std::pair{nsv_X, sdp_X}, std::pair{nsv_Y, sdp_Y}})
+    {
+      const Named_Args_Map args{{"--input", nsv.string()},
+                                {"--output", sdp.string()},
+                                {"--precision", std::to_string(precision)}};
+      runner.create_nested("pmp2sdp_" + sdp.filename().string())
+        .mpi_run({"build/pmp2sdp", args}, num_procs);
+    }
+  size_t num_blocks = 0;
+  {
+    const auto control_json = read_file(sdp_X / "control.json");
+    const std::string key = "\"num_blocks\":";
+    const auto pos = control_json.find(key);
+    REQUIRE(pos != std::string::npos);
+    num_blocks = std::stoul(control_json.substr(pos + key.size()));
+  }
+  std::string block_timings = "1000\n";
+  for(size_t i = 1; i < num_blocks; ++i)
+    block_timings += "1\n";
+
+  const auto sdpb_args = boost::program_options::split_unix(
+    "--checkpointInterval 3600 --maxRuntime 1341 "
+    "--dualityGapThreshold 1.0e-30 --primalErrorThreshold 1.0e-200 "
+    "--dualErrorThreshold 1.0e-200 --initialMatrixScalePrimal 1.0e20 "
+    "--initialMatrixScaleDual 1.0e20 --feasibleCenteringParameter 0.1 "
+    "--infeasibleCenteringParameter 0.3 --stepLengthReduction 0.7 "
+    "--maxComplementarity 1.0e100 --maxIterations 1000 --verbosity 1 "
+    "--writeSolution y,z --detectPrimalFeasibleJump --detectDualFeasibleJump "
+    "--precision "
+    + std::to_string(precision));
+
+  // File route: X, Y, X
+  const auto ck_file = output_dir / "ck_file";
+  fs::create_directories(ck_file);
+  write_file(ck_file / "block_timings", block_timings);
+  const std::vector<fs::path> sdps{sdp_X, sdp_Y, sdp_X};
+  for(size_t k = 0; k < sdps.size(); ++k)
+    {
+      const auto name = "file_" + std::to_string(k + 1);
+      const Named_Args_Map args{
+        {"--sdpDir", sdps[k].string()},
+        {"--checkpointDir", ck_file.string()},
+        {"--outDir", (output_dir / ("out_" + name)).string()}};
+      runner.create_nested("sdpb_" + name)
+        .mpi_run({"build/sdpb", sdpb_args, args}, num_procs);
+      snapshot_checkpoint(ck_file, output_dir / ("ck_" + name));
+    }
+
+  // Resident: the family, lambda = (1,0), (0,1), (1,0)
+  const auto ck_res = output_dir / "ck_res";
+  fs::create_directories(ck_res);
+  write_file(ck_res / "block_timings", block_timings);
+  const auto control = output_dir / "control";
+  fs::create_directories(control);
+  const auto solve = [&](int k) {
+    return "{\"cmd\": \"solve\", \"checkpoint\": true, \"args\": [\"--outDir="
+           + (output_dir / ("out_res_" + std::to_string(k))).string()
+           + "\", \"--checkpointDir="
+           + (output_dir / ("ck_res_" + std::to_string(k))).string() + "\"]}";
+  };
+  const auto set = [](const std::string &l0, const std::string &l1) {
+    return "{\"cmd\": \"set_coefficients\", \"family\": \"ext\", "
+           "\"lambda\": [\""
+           + l0 + "\", \"" + l1 + "\"]}";
+  };
+  write_file(control / "cmd.1.json",
+             "{\"commands\": [{\"cmd\": \"load_family\", \"name\": \"ext\", "
+             "\"block\": 0, \"form_dim\": 2, \"normalization_file\": \""
+               + fs::absolute(dir_A / norm_file).string()
+               + "\", \"components\": [\"" + comp_00.string() + "\", \""
+               + comp_01.string() + "\", \"" + comp_11.string() + "\"]}, "
+               + set("1", "0") + ", " + solve(1) + "]}");
+  write_file(control / "cmd.2.json", "{\"commands\": [" + set("0", "1") + ", "
+                                       + solve(2) + "]}");
+  write_file(control / "cmd.3.json", "{\"commands\": [" + set("1", "0") + ", "
+                                       + solve(3) + "]}");
+  write_file(control / "cmd.4.json", "{\"cmd\": \"quit\"}");
+  const Named_Args_Map resident_args{{"--sdpDir", sdp_X.string()},
+                                     {"--checkpointDir", ck_res.string()},
+                                     {"--controlDir", control.string()}};
+  runner.create_nested("sdpb_resident")
+    .mpi_run({"build/sdpb", sdpb_args, resident_args}, num_procs);
+  for(int seq = 1; seq <= 4; ++seq)
+    {
+      CAPTURE(seq);
+      const auto result
+        = read_file(control / ("res." + std::to_string(seq) + ".json"));
+      CAPTURE(result);
+      REQUIRE(result.find("\"error\"") == std::string::npos);
+    }
+  REQUIRE(terminate_reason(output_dir / "out_file_1")
+          != terminate_reason(output_dir / "out_file_2"));
+
+  for(int k = 1; k <= 3; ++k)
+    {
+      CAPTURE(k);
+      const auto out_file = output_dir / ("out_file_" + std::to_string(k));
+      const auto out_res = output_dir / ("out_res_" + std::to_string(k));
+      REQUIRE(out_txt_without_runtime(out_file)
+              == out_txt_without_runtime(out_res));
+      for(const auto *name : {"y.txt", "z.txt"})
+        {
+          CAPTURE(name);
+          REQUIRE(read_file(out_file / name) == read_file(out_res / name));
+        }
       const auto ck_f = output_dir / ("ck_file_" + std::to_string(k));
       const auto ck_r = output_dir / ("ck_res_" + std::to_string(k));
       const auto files = checkpoint_files(ck_f, k);

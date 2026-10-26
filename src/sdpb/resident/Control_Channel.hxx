@@ -48,6 +48,9 @@ public:
 private:
   std::filesystem::path dir;
   int64_t idle_timeout_seconds;
+  // Parent process at start; a waiting rank whose parent changed exits
+  int parent_pid;
+  [[nodiscard]] bool orphaned() const;
   size_t current_seq = 0;
   Stop_Reason reason = Stop_Reason::none;
 };

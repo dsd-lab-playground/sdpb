@@ -4,7 +4,10 @@
 
 #include <El.hpp>
 
+#include <unistd.h>
+
 #include <chrono>
+#include <cstdlib>
 #include <fstream>
 #include <sstream>
 #include <thread>
@@ -46,10 +49,30 @@ std::string to_string(const Control_Channel::Stop_Reason reason)
 
 Control_Channel::Control_Channel(const fs::path &dir,
                                  const int64_t idle_timeout_seconds)
-    : dir(dir), idle_timeout_seconds(idle_timeout_seconds)
+    : dir(dir), idle_timeout_seconds(idle_timeout_seconds),
+      parent_pid(getppid())
 {
   if(El::mpi::Rank() == 0)
-    fs::create_directories(dir);
+    {
+      fs::create_directories(dir);
+      // Results and status files of an earlier process would be mistaken for
+      // ours; commands written in advance are kept
+      for(const auto &entry : fs::directory_iterator(dir))
+        {
+          const auto name = entry.path().filename().string();
+          if(name.rfind("res.", 0) == 0 || name == "ready.json"
+             || name == "exit.json" || name == "stop" || name == "alive")
+            fs::remove(entry.path());
+        }
+    }
+  El::mpi::Barrier(El::mpi::COMM_WORLD);
+}
+
+bool Control_Channel::orphaned() const
+{
+  // The launcher (mpirun's daemon, slurmstepd) is gone: nobody will send
+  // commands or clean up this process
+  return getppid() != parent_pid;
 }
 
 std::optional<std::string> Control_Channel::next_command(const Environment &env)
@@ -75,6 +98,14 @@ std::optional<std::string> Control_Channel::next_command(const Environment &env)
             {
               status = static_cast<int>(Stop_Reason::sigterm);
               break;
+            }
+          if(orphaned())
+            {
+              // The other ranks may be gone too: no MPI from here
+              write_file("exit.json", "{\"status\": \"exit\", \"reason\": "
+                                      "\"launcher exited\", \"pid\": "
+                                        + std::to_string(getpid()) + "}");
+              std::_Exit(1);
             }
           if(fs::exists(dir / "stop"))
             {
@@ -113,7 +144,11 @@ std::optional<std::string> Control_Channel::next_command(const Environment &env)
         {
           MPI_Test(&request, &done, MPI_STATUS_IGNORE);
           if(!done)
-            std::this_thread::sleep_for(std::chrono::microseconds(500));
+            {
+              if(orphaned())
+                std::_Exit(1);
+              std::this_thread::sleep_for(std::chrono::microseconds(500));
+            }
         }
     }
 

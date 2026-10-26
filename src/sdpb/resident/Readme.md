@@ -23,11 +23,20 @@ dimension, precision, ranks) and waits.
 - The driver writes the commands `<dir>/cmd.1.json`, `cmd.2.json`, ... Each must appear at once: write it under another
   name in `<dir>`, then rename it.
 - SDPB answers each with `<dir>/res.<seq>.json` (also renamed into place): `{"seq": n, "results": [...]}`, one object
-  per command, or `{"error": "..."}` for a command that failed. A failed command does not stop SDPB.
+  per command, or `{"error": "..."}` for a command that failed.
+- Errors: each command first validates its input on all ranks (fields, files, block sizes, N, checkpoint files),
+  before it changes anything; such an error is answered and SDPB carries on with its state unchanged. An error later,
+  inside the work itself (e.g. a malformed PMP file, a write that fails), may happen on some ranks only, inside a
+  collective operation, so SDPB aborts MPI as `sdpb` does; restart from the last checkpoint.
 - A command file holds one command (a JSON object with `"cmd"`), or a batch `{"commands": [...]}`, executed in order
   until the first error.
 - While waiting, rank 0 polls for the next file (100 µs, doubling to 20 ms) and touches `<dir>/alive` every 10 s. The
   other ranks wait in `MPI_Ibarrier` and sleep, so idle ranks leave the CPUs to the driver.
+- At start, SDPB removes `res.*`, `ready.json`, `exit.json`, `stop` and `alive` left in `<dir>` by an earlier
+  process; command files are kept (they may be written in advance, as SDPB's integration test does). A driver must not
+  leave old `cmd.*` files behind.
+- A rank whose parent process (the launcher: slurmstepd, mpirun's daemon) disappears while it waits for a command
+  exits, so that a killed launcher leaves no process behind.
 - SDPB stops on `quit`, on SIGTERM, when `<dir>/stop` appears, or after `--controlIdleTimeout` seconds without a
   command. In the last three cases it first writes a checkpoint to `--checkpointDir` if the iterate is newer than the
   last one written there (as `sdpb` does on SIGTERM). It writes `<dir>/exit.json` (reason, last seq).
@@ -41,7 +50,7 @@ dimension, precision, ranks) and waits.
 | `solve` | `args`, `start`, `checkpoint`, `write_solution`, `derived` | run the solver |
 | `update_pmp` | `pmp` | replace the changed blocks (and the objective) from PMP files, converted in memory |
 | `update_sdp` | `sdp`, `blocks` | re-read blocks and the objective from an SDP directory written by pmp2sdp |
-| `load_family` | `name`, `block`, `components`, `form_dim` | make a block parametric: c = Σ w_i c_i, B = Σ w_i B_i |
+| `load_family` | `name`, `block`, `components`, `form_dim`, `normalization_file` | make a block parametric: c = Σ w_i c_i, B = Σ w_i B_i |
 | `set_coefficients` | `family`, `coefficients` or `lambda` | set the w_i of a family and rebuild its block |
 | `negate_normalization` | | n → −n (e.g. upper vs lower bound of an OPE coefficient at a fixed point) |
 | `save_iterate`, `restore_iterate`, `drop_iterate` | `name` or `dir` | keep (x, X, y, Y) in memory, or as a checkpoint in `dir` |
@@ -61,8 +70,9 @@ dimension, precision, ranks) and waits.
   (load from the solve's `--initialCheckpointDir`/`--checkpointDir`), or `{"iterate": "<name>"}`.
 - `checkpoint` (default false): write a checkpoint to `--checkpointDir` after the solve. Without it, no checkpoint is
   written (except on SIGTERM); the iterate stays in memory.
-- `write_solution` (default true): write `out.txt`, `y.txt`, `z.txt`, ... and `iterations.json` to `--outDir`, as
-  `sdpb` does, so a driver can read results the way it reads them today.
+- `write_solution` (default true): write `out.txt`, `y.txt`, `z.txt`, ... to `--outDir`, as `sdpb` does, so a
+  driver can read results the way it reads them today. (`iterations.json` and `c_minus_By/` are written in any case,
+  as by `sdpb`.)
 - `derived`: extra results in the answer. `"y"`, `"z"` (strings at full precision); `"family_values"`: for each family
   and component i, c_i − B_i·y over the block's rows. For a 1x1 constant block this is the functional on the component
   (times the positive sample scaling; `pmp_values` divides it out): for the OPE search, the cut form α·𝒢_ab.
@@ -92,7 +102,10 @@ file in `pmp_info.json` differs from the current one), `"all"`, or a list of ind
 
 A family makes block `block` parametric: its constraint data become c = Σ_i w_i c_i and B = Σ_i w_i B_i, with the
 components (c_i, B_i) converted once from PMP files `components` (one matrix each, with the block's size, sample
-points and bilinear basis; converted with the SDP's normalization). The bilinear bases must agree. With `form_dim` =
+points and bilinear basis). The bilinear bases must agree. The components are converted with the SDP's normalization:
+give `normalization_file` (the PMP file that holds it) to use the values pmp2sdp parsed, exactly; otherwise the
+values of `normalization.json` are used (a decimal round trip). `negate_normalization` negates the families' c_i too;
+after `update_sdp` changes the normalization, `set_coefficients` refuses a family loaded before (load it again). With `form_dim` =
 m, the components are the upper triangle (row-major) of a symmetric m×m matrix 𝒢, and `set_coefficients` may give
 `lambda` (m numbers, decimal or p/q): w_ab = λ_a λ_b, doubled for a < b, so that the block is λᵀ𝒢λ. Otherwise
 `coefficients` gives the w_i. The sum is computed in that order at the working precision on the root of the block's
@@ -112,7 +125,8 @@ negated normalization, bitwise.
 ### Iterates and checkpoints
 
 `save_iterate {"name"}` copies (x, X, y, Y) in memory (about two X-sized blocks per copy); with `"dir"` it writes a
-checkpoint there instead (the main checkpoint's generation counters are kept). `restore_iterate` is the inverse.
+checkpoint there instead (the main checkpoint's generation counters are kept, as for `checkpoint {"dir"}` with another
+directory). `restore_iterate` is the inverse; it first checks that the checkpoint has a file for every rank.
 `checkpoint` writes to `--checkpointDir` and copies `block_timings` next to it, so that a new process restarted from
 it has the same block distribution.
 
