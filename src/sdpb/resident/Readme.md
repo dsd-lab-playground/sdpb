@@ -55,7 +55,8 @@ dimension, precision, ranks) and waits.
   give are taken from the resident process's command line. They are parsed at the GMP precision of sdpb's own
   command-line parsing (before `--precision` is set), so BigFloat options (thresholds, centering parameters) have the
   same values as in an `sdpb` run. `--precision`, `--sparseB`, `--maxSharedMemory` and `--procGranularity` are fixed
-  at start-up. Boolean switches given at start-up cannot be turned off per solve.
+  at start-up. Boolean switches given at start-up cannot be turned off per solve. An `--sdpDir` in `args` must name
+  the SDP in memory (the last `update_sdp` directory, or the start-up one); to solve another SDP, update first.
 - `start`: `"current"` (default: the iterate in memory), `"initial"` (X = Ω_p I, Y = Ω_d I, x = y = 0), `"checkpoint"`
   (load from the solve's `--initialCheckpointDir`/`--checkpointDir`), or `{"iterate": "<name>"}`.
 - `checkpoint` (default false): write a checkpoint to `--checkpointDir` after the solve. Without it, no checkpoint is

@@ -527,6 +527,22 @@ namespace
   {
     const auto start = Clock::now();
     const auto args = get_string_list(command, "args");
+    // The SDP is the one in memory: a different --sdpDir in the arguments is
+    // a mistake (use update_sdp or update_pmp)
+    {
+      const auto sdp_dir = find_option(args, "--sdpDir", "-s");
+      if(sdp_dir.has_value())
+        {
+          std::error_code ec;
+          const bool same
+            = fs::path(sdp_dir.value()).lexically_normal()
+                == files.dir.lexically_normal()
+              || fs::equivalent(sdp_dir.value(), files.dir, ec);
+          ASSERT(same, "solve: --sdpDir ", sdp_dir.value(),
+                 " is not the SDP in memory (", files.dir,
+                 "); use update_sdp or update_pmp to change it");
+        }
+    }
     // Parse at the precision sdpb parses its command line at
     std::optional<SDPB_Parameters> parsed;
     {
