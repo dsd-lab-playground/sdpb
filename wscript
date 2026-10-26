@@ -129,12 +129,15 @@ def build(bld):
                         'src/sdpb/solve.cxx',
                         'src/sdpb/write_timing.cxx',
                         'src/sdpb/SDPB_Parameters.cxx',
-                        'src/sdpb/save_solution.cxx'],
+                        'src/sdpb/save_solution.cxx',
+                        'src/sdpb/resident/Control_Channel.cxx',
+                        'src/sdpb/resident/Resident.cxx'],
                 target='sdpb',
                 cxxflags=default_flags,
                 defines=default_defines,
                 includes=default_includes,
-                use=use_packages + ['sdp_solve', 'mpsolve']
+                use=use_packages + ['sdp_solve', 'mpsolve', 'pmp_read',
+                                    'pmp', 'pmp2sdp_lib']
                 )
 
     pmp2sdp_sources = ['src/pmp2sdp/Dual_Constraint_Group/Dual_Constraint_Group.cxx',
