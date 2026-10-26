@@ -130,8 +130,12 @@ calls took 72.9 s instead of 110.4 s (pmp2sdp --reuseSdp + sdpb).
 
 Replacing a block in place needs `copy_matrix_from_root` to really copy: it used `QueueUpdate`, which adds, so on a
 block owned by several ranks the old and new data were summed. A 2-node run showed it (different verdicts from the
-second solve on); it now zeros the destination first, which changes nothing when an SDP is read. A rerun on 2 real
-nodes with the fix is still to do.
+second solve on); it now zeros the destination first, which changes nothing when an SDP is read. With the fix the
+2-node replay is bitwise for all 16 calls.
+
+The integration test `resident` (`test/src/integration_tests/cases/resident.test.cxx`) solves A, B, A both ways
+(SingletScalarAllowed nmax6: excluded, allowed, excluded; the changed block on a multi-rank group) and compares
+out.txt, y, z and every checkpoint file after each solve. It fails without the copy fix.
 
 ## Failure handling (driver side)
 
