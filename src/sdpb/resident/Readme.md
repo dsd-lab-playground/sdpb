@@ -124,8 +124,14 @@ values, and the solver's other state is rebuilt by `SDP_Solver::run()` at each s
 state kept between runs is the BigInt syrk context (shared memory windows), which depends only on the block
 structure. Checked in the lab (bootstrap-speed#197): out.txt, y, z and every checkpoint file bitwise equal, call by
 call, for a 16-call λ sequence with alternating verdicts (update_pmp and update_sdp), objective changes, and
-normalization flips, at 2 ranks; and for 4 calls of #173's nmax10 OPE search (113 blocks, 960 bits) at David's
-1x128 launch on Expanse, where one-step hot calls took 72.9 s instead of 110.4 s (pmp2sdp --reuseSdp + sdpb).
+normalization flips, at 2 ranks; with multi-rank block groups (8 and 24 ranks) and 2 simulated nodes; and for 4
+calls of #173's nmax10 OPE search (113 blocks, 960 bits) at David's 1x128 launch on Expanse, where one-step hot
+calls took 72.9 s instead of 110.4 s (pmp2sdp --reuseSdp + sdpb).
+
+Replacing a block in place needs `copy_matrix_from_root` to really copy: it used `QueueUpdate`, which adds, so on a
+block owned by several ranks the old and new data were summed. A 2-node run showed it (different verdicts from the
+second solve on); it now zeros the destination first, which changes nothing when an SDP is read. A rerun on 2 real
+nodes with the fix is still to do.
 
 ## Failure handling (driver side)
 
