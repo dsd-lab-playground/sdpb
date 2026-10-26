@@ -293,6 +293,8 @@ namespace
     void checkpoint(const fs::path &dir,
                     const boost::property_tree::ptree &properties);
     const SDPB_Parameters &startup_parameters() const { return parameters; }
+    // The iterate in memory is newer than the last checkpoint written
+    bool dirty = false;
 
   private:
     const Environment &env;
@@ -440,6 +442,8 @@ namespace
                              const boost::property_tree::ptree &properties)
   {
     solver.save_checkpoint(dir, parameters.verbosity, properties);
+    if(dir == parameters.solver.checkpoint_out)
+      dirty = false;
     // Keep the block distribution with the checkpoint, as the file route
     // does, so that a restart from it gives the same layout
     if(El::mpi::Rank() == 0 && !block_timings_path.empty()
@@ -604,6 +608,7 @@ namespace
       &syrk_context));
     const double run_seconds = seconds_since(run_start);
     ++num_solves;
+    dirty = true;
 
     if(p.verbosity >= Verbosity::regular && El::mpi::Rank() == 0)
       {
@@ -1503,8 +1508,10 @@ void run_resident(const Environment &env, const SDPB_Parameters &parameters,
         channel.write_result(sb.GetString());
     }
 
+  // Stopped without 'quit' (SIGTERM, stop file, idle timeout): keep the
+  // iterate if it is newer than the last checkpoint
   const auto reason = channel.stop_reason();
-  if(reason == Control_Channel::Stop_Reason::sigterm)
+  if(reason != Control_Channel::Stop_Reason::none && state.dirty)
     state.checkpoint(parameters.solver.checkpoint_out,
                      to_property_tree(parameters));
   if(El::mpi::Rank() == 0)

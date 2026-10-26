@@ -28,8 +28,9 @@ dimension, precision, ranks) and waits.
   until the first error.
 - While waiting, rank 0 polls for the next file (100 µs, doubling to 20 ms) and touches `<dir>/alive` every 10 s. The
   other ranks wait in `MPI_Ibarrier` and sleep, so idle ranks leave the CPUs to the driver.
-- SDPB stops on `quit`, on SIGTERM (it writes a checkpoint first, as `sdpb` does), when `<dir>/stop` appears, or after
-  `--controlIdleTimeout` seconds without a command. It writes `<dir>/exit.json` (reason, last seq).
+- SDPB stops on `quit`, on SIGTERM, when `<dir>/stop` appears, or after `--controlIdleTimeout` seconds without a
+  command. In the last three cases it first writes a checkpoint to `--checkpointDir` if the iterate is newer than the
+  last one written there (as `sdpb` does on SIGTERM). It writes `<dir>/exit.json` (reason, last seq).
 
 `people/lab/197-resident-sdpb/resident.py` in the bootstrap-speed repository is a minimal Python driver.
 
