@@ -3,7 +3,7 @@
 // TODO: Have this be part of sdp_solve.hxx
 void solve_schur_complement_equation(
   const Block_Diagonal_Matrix &schur_complement_cholesky,
-  const Block_Matrix &schur_off_diagonal,
+  const Block_Matrix &schur_off_diagonal, const Block_Matrix &free_var_matrix,
   const El::DistMatrix<El::BigFloat> &Q, Block_Vector &dx, Block_Vector &dy);
 
 void compute_dx_dy(const Block_Info &block_info,
@@ -35,6 +35,8 @@ void compute_dx_dy(const Block_Info &block_info,
                dy.blocks[block_index]);
     }
   // Solve for dx, dy in-place
+  // schur_off_diagonal is kept here, so the B argument is unused
   solve_schur_complement_equation(schur_complement_cholesky,
-                                  schur_off_diagonal, Q, dx, dy);
+                                  schur_off_diagonal, schur_off_diagonal, Q,
+                                  dx, dy);
 }

@@ -5,6 +5,8 @@
 #include "sdp_solve/memory_estimates.hxx"
 #include "sdpb_util/Timers/Timers.hxx"
 
+#include <cstdlib>
+
 // schur_off_diagonal = L^{-1} B
 void initialize_schur_off_diagonal(
   const Environment &env, const SDP &sdp, const Block_Info &block_info,
@@ -148,4 +150,14 @@ void compute_Q(const Environment &env, const SDP &sdp,
                                 timers, block_timings_ms, verbosity);
   syrk_Q(env, schur_off_diagonal, bigint_syrk_context, Q, timers,
          block_timings_ms, verbosity);
+  // #194 (lab, prototype): with SDPB_STREAM_LINVB=1, L^{-1} B is not kept
+  // after Q is formed. solve_schur_complement_equation() then uses B and the
+  // Cholesky factor L with single-vector solves instead (exact algebra:
+  // (L^{-1}B)^T L^{-1} r = B^T L^{-T} L^{-1} r and (L^{-1}B) dy = L^{-1}(B dy)).
+  const char *stream = std::getenv("SDPB_STREAM_LINVB");
+  if(stream != nullptr && std::string(stream) == "1")
+    {
+      schur_off_diagonal.blocks.clear();
+      schur_off_diagonal.blocks.shrink_to_fit();
+    }
 }

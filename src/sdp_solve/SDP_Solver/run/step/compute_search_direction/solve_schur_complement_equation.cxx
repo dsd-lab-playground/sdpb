@@ -15,11 +15,22 @@
 //
 void solve_schur_complement_equation(
   const Block_Diagonal_Matrix &schur_complement_cholesky,
-  const Block_Matrix &schur_off_diagonal,
+  const Block_Matrix &schur_off_diagonal, const Block_Matrix &free_var_matrix,
   const El::DistMatrix<El::BigFloat> &Q, Block_Vector &dx, Block_Vector &dy)
 {
+  // #194: if L^{-1} B was freed after forming Q (SDPB_STREAM_LINVB=1), use B.
+  const bool streaming = schur_off_diagonal.blocks.empty()
+                         && !free_var_matrix.blocks.empty();
+
   // dx = schur_complement^{-1}.dx
   lower_triangular_solve(schur_complement_cholesky, dx);
+
+  // streaming: w = L^{-T} L^{-1} r, so that B^T w = (L^{-1}B)^T (L^{-1} r)
+  Block_Vector w(dx);
+  if(streaming)
+    lower_triangular_transpose_solve(schur_complement_cholesky, w);
+  const Block_Matrix &left = streaming ? free_var_matrix : schur_off_diagonal;
+  const Block_Vector &right = streaming ? w : dx;
 
   El::DistMatrix<El::BigFloat> dy_dist;
   Zeros(dy_dist, Q.Height(), 1);
@@ -27,11 +38,11 @@ void solve_schur_complement_equation(
     El::Matrix<El::BigFloat> dy_sum;
     Zeros(dy_sum, Q.Height(), 1);
 
-    for(size_t block = 0; block < schur_off_diagonal.blocks.size(); ++block)
+    for(size_t block = 0; block < left.blocks.size(); ++block)
       {
         Gemv(El::OrientationNS::TRANSPOSE, El::BigFloat(-1),
-             schur_off_diagonal.blocks[block], dx.blocks[block],
-             El::BigFloat(1), dy.blocks[block]);
+             left.blocks[block], right.blocks[block], El::BigFloat(1),
+             dy.blocks[block]);
 
         // Locally sum contributions to dy
         for(int64_t row = 0; row < dy.blocks[block].LocalHeight(); ++row)
@@ -66,12 +77,30 @@ void solve_schur_complement_equation(
   El::DistMatrix<El::BigFloat, El::STAR, El::STAR> dy_local(dy_dist);
 
   // dx += schur_off_diagonal.dy
-  for(size_t block = 0; block < schur_off_diagonal.blocks.size(); ++block)
+  if(!streaming)
     {
-      copy_matrix(dy_local, dy.blocks[block]);
-      Gemv(El::OrientationNS::NORMAL, El::BigFloat(1),
-           schur_off_diagonal.blocks[block], dy.blocks[block], El::BigFloat(1),
-           dx.blocks[block]);
+      for(size_t block = 0; block < schur_off_diagonal.blocks.size(); ++block)
+        {
+          copy_matrix(dy_local, dy.blocks[block]);
+          Gemv(El::OrientationNS::NORMAL, El::BigFloat(1),
+               schur_off_diagonal.blocks[block], dy.blocks[block],
+               El::BigFloat(1), dx.blocks[block]);
+        }
+    }
+  else
+    {
+      // streaming: dx += L^{-1} (B dy)
+      Block_Vector v(dx);
+      for(size_t block = 0; block < free_var_matrix.blocks.size(); ++block)
+        {
+          copy_matrix(dy_local, dy.blocks[block]);
+          Gemv(El::OrientationNS::NORMAL, El::BigFloat(1),
+               free_var_matrix.blocks[block], dy.blocks[block],
+               El::BigFloat(0), v.blocks[block]);
+        }
+      lower_triangular_solve(schur_complement_cholesky, v);
+      for(size_t block = 0; block < dx.blocks.size(); ++block)
+        El::Axpy(El::BigFloat(1), v.blocks[block], dx.blocks[block]);
     }
 
   // dx = schur_complement^{-T}.dx
