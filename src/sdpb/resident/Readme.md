@@ -124,7 +124,8 @@ values, and the solver's other state is rebuilt by `SDP_Solver::run()` at each s
 state kept between runs is the BigInt syrk context (shared memory windows), which depends only on the block
 structure. Checked in the lab (bootstrap-speed#197): out.txt, y, z and every checkpoint file bitwise equal, call by
 call, for a 16-call λ sequence with alternating verdicts (update_pmp and update_sdp), objective changes, and
-normalization flips, at 2 ranks. The same check at David's 1x128 launch on #173's nmax10 point: pending.
+normalization flips, at 2 ranks; and for 4 calls of #173's nmax10 OPE search (113 blocks, 960 bits) at David's
+1x128 launch on Expanse, where one-step hot calls took 72.9 s instead of 110.4 s (pmp2sdp --reuseSdp + sdpb).
 
 ## Failure handling (driver side)
 
