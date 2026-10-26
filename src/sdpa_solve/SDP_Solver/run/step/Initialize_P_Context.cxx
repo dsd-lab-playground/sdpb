@@ -312,18 +312,23 @@ namespace Sdpb::Sdpa
     static thread_local std::map<Key, Schedule> schedule_cache;
     std::optional<Schedule> fresh_schedule;
     const Schedule *schedule;
-    Scoped_Timer schedule_timer(timers, "schedule");
     const auto *enable_cache = std::getenv("SDPB_TRMM_SCHEDULE_CACHE");
     const bool cache_enabled = enable_cache && std::string(enable_cache) == "1";
+    // cfg.num_primes() constructs a complete Fmpz_Comb. The context already
+    // owns that same immutable comb, so its stored count is sufficient.
+    Scoped_Timer prime_count_timer(timers, "prime_count");
+    const auto num_primes = cache_enabled ? comb.num_primes : cfg.num_primes();
+    prime_count_timer.stop();
+    Scoped_Timer schedule_timer(timers, "schedule");
     const auto make_schedule = [&]() {
       return Trmm::create_blas_job_schedule(
         side, uplo, orientation, diag, shared_memory_comm.Size(),
-        cfg.num_primes(), heights, widths, verbosity);
+        num_primes, heights, widths, verbosity);
     };
     if(cache_enabled)
       {
         const Key key{side, uplo, orientation, diag, shared_memory_comm.Size(),
-                      cfg.num_primes(), heights, widths};
+                      num_primes, heights, widths};
         auto it = schedule_cache.find(key);
         if(it == schedule_cache.end())
           {
