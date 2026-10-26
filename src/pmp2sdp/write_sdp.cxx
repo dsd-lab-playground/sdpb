@@ -8,7 +8,12 @@
 #include "sdpb_util/Timers/Timers.hxx"
 #include "sdpb_util/ostream/pretty_print_bytes.hxx"
 
+#include <atomic>
 #include <filesystem>
+#include <fstream>
+#include <future>
+#include <optional>
+#include <sstream>
 
 #include <boost/iostreams/device/file.hpp>
 #include <boost/iostreams/filtering_stream.hpp>
@@ -186,6 +191,46 @@ namespace
     }
   }
 
+  // Call f(i) for i in [0, n) from several threads. File system metadata
+  // operations (stat, link) on Lustre take ~10 ms each, and Lustre serves
+  // concurrent requests from one client.
+  template <class F> void parallel_for_index(const size_t n, const F &f)
+  {
+    const size_t num_threads = std::min<size_t>(n, 16);
+    std::atomic<size_t> next(0);
+    std::vector<std::future<void>> futures;
+    for(size_t t = 0; t < num_threads; ++t)
+      futures.push_back(std::async(std::launch::async, [&] {
+        for(size_t i; (i = next++) < n;)
+          f(i);
+      }));
+    // get() rethrows exceptions from the threads
+    for(auto &future : futures)
+      future.get();
+  }
+
+  // Hard link from_path to to_path, or copy it if linking fails
+  // (e.g. across filesystems). Returns the file size.
+  size_t link_or_copy(const fs::path &from_path, const fs::path &to_path)
+  {
+    std::error_code ec;
+    fs::create_hard_link(from_path, to_path, ec);
+    if(ec)
+      fs::copy_file(from_path, to_path);
+    return fs::file_size(to_path);
+  }
+
+  std::optional<std::string> read_file_if_exists(const fs::path &path)
+  {
+    if(!fs::exists(path))
+      return std::nullopt;
+    std::ifstream in(path, std::ios::binary);
+    ASSERT(in.good(), "Failed to open ", path);
+    std::stringstream ss;
+    ss << in.rdbuf();
+    return ss.str();
+  }
+
   void check_file_size(const fs::path &file_path, const size_t expected_size)
   {
     ASSERT_EQUAL(file_size(file_path), expected_size, DEBUG_STRING(file_path));
@@ -232,13 +277,12 @@ namespace
           check_file_size(get_normalization_path(temp_dir),
                           num_normalization_bytes.value());
         }
-      for(size_t i = 0; i < num_blocks; ++i)
-        {
-          check_file_size(get_block_info_path(temp_dir, i),
-                          block_info_sizes.at(i));
-          check_file_size(get_block_data_path(temp_dir, i, output_format),
-                          block_data_sizes.at(i));
-        }
+      parallel_for_index(num_blocks, [&](const size_t i) {
+        check_file_size(get_block_info_path(temp_dir, i),
+                        block_info_sizes.at(i));
+        check_file_size(get_block_data_path(temp_dir, i, output_format),
+                        block_data_sizes.at(i));
+      });
     }
   }
 }
@@ -246,8 +290,9 @@ namespace
 void write_sdp(const fs::path &output_path, const Output_SDP &sdp,
                const Polynomial_Matrix_Program &pmp,
                Block_File_Format block_file_format, bool zip, Timers &timers,
-               const Verbosity verbosity)
+               const Verbosity verbosity, const Reused_SDP *reuse)
 {
+  ASSERT(reuse == nullptr || !zip, "--reuseSdp does not support --zip");
   Scoped_Timer write_timer(timers, "write_sdp");
 
   const int rank = El::mpi::Rank();
@@ -315,6 +360,23 @@ void write_sdp(const fs::path &output_path, const Output_SDP &sdp,
             zip, block_file_format == Block_File_Format::bin);
         }
       }
+    // Blocks reused from an old SDP: link them under their new indices
+    if(reuse != nullptr && rank == 0)
+      {
+        Scoped_Timer reuse_timer(timers, "link_reused_blocks");
+        parallel_for_index(sdp.num_blocks, [&](const size_t block_index) {
+          const auto &old_index = reuse->new_to_old.at(block_index);
+          if(!old_index.has_value())
+            return;
+          block_info_sizes.at(block_index) = link_or_copy(
+            get_block_info_path(reuse->old_sdp, old_index.value()),
+            get_block_info_path(temp_dir, block_index));
+          block_data_sizes.at(block_index) = link_or_copy(
+            get_block_data_path(reuse->old_sdp, old_index.value(),
+                                block_file_format),
+            get_block_data_path(temp_dir, block_index, block_file_format));
+        });
+      }
   }
   {
     Scoped_Timer reduce_timer(timers, "mpi_reduce_block_sizes");
@@ -372,7 +434,12 @@ void write_sdp(const fs::path &output_path, const Output_SDP &sdp,
         zip);
       size_t num_pmp_info_bytes = write_data_and_count_bytes(
         get_pmp_info_path(temp_dir),
-        [&](std::ostream &os) { write_pmp_info_json(os, pmp_info_blocks); },
+        [&](std::ostream &os) {
+          if(reuse != nullptr)
+            write_pmp_info_json(os, pmp_info_blocks, *reuse);
+          else
+            write_pmp_info_json(os, pmp_info_blocks);
+        },
         zip);
       std::optional<size_t> num_normalization_bytes;
       if(sdp.normalization.has_value())
@@ -383,6 +450,19 @@ void write_sdp(const fs::path &output_path, const Output_SDP &sdp,
               write_normalization_json(os, sdp.normalization.value());
             },
             zip);
+        }
+      if(reuse != nullptr)
+        {
+          // Every block depends on the normalization,
+          // so reused blocks are valid only if it did not change.
+          const auto old_normalization
+            = read_file_if_exists(reuse->normalization_path());
+          const auto new_normalization
+            = read_file_if_exists(get_normalization_path(temp_dir));
+          ASSERT(old_normalization == new_normalization,
+                 "--reuseSdp: the normalization differs from the one in ",
+                 reuse->normalization_path(),
+                 " (or was not found in the input files that were read)");
         }
 
       if(zip)
