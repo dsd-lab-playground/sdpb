@@ -5,6 +5,8 @@
 
 #include <boost/math/constants/constants.hpp>
 #include <iterator>
+#include <cstdlib>
+#include <string>
 
 std::vector<Boost_Float>
 sample_points(const size_t &num_points, const Damped_Rational &prefactor);
@@ -188,6 +190,37 @@ Polynomial_Vector_Matrix::Polynomial_Vector_Matrix(
       }
     return sample_scalings;
   }();
+
+  // Experimental half-line row equilibration, issue #209. Default is unchanged.
+  // Multiply BOTH full and reduced scalings by the same positive factor:
+  // this preserves their ratio when pole reduction is present.
+  if(const char *mode = std::getenv("SDPB_209_EQUILIBRATE"))
+    {
+      ASSERT(std::string(mode) == "1", "SDPB_209_EQUILIBRATE must be 1 or unset");
+      ASSERT(!bilinear_basis_opt.has_value(),
+             "Experimental equilibration requires default bilinear bases");
+      std::vector<El::BigFloat> row_size(sample_points.size(), 0);
+      for(size_t k = 0; k < sample_points.size(); ++k)
+        for(int i = 0; i < polynomials.Height(); ++i)
+          for(int j = 0; j <= i; ++j)
+            for(const auto &poly : polynomials(i, j))
+              row_size[k] = std::max(row_size[k], El::Abs(poly(sample_points[k])));
+      const El::BigFloat largest
+        = *std::max_element(row_size.begin(), row_size.end());
+      if(largest != El::BigFloat(0))
+        {
+          const El::BigFloat floor
+            = largest * El::Sqrt(El::limits::Epsilon<El::BigFloat>());
+          for(size_t k = 0; k < sample_points.size(); ++k)
+            {
+              ASSERT(sample_scalings[k] > 0 && reduced_sample_scalings[k] > 0);
+              const El::BigFloat target = 1 / std::max(row_size[k], floor);
+              const El::BigFloat ratio = reduced_sample_scalings[k] / sample_scalings[k];
+              sample_scalings[k] = target;
+              reduced_sample_scalings[k] = ratio * target;
+            }
+        }
+    }
 
   bilinear_basis = bilinear_basis_or_default(bilinear_basis_opt, sample_points,
                                              reduced_sample_scalings);
