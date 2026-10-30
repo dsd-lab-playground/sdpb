@@ -45,6 +45,9 @@ namespace lab235
     std::vector<int> stale_S;        // stale levels for S spectra
     std::vector<int> stale_pcg;      // stale levels for PCG runs
     std::vector<int> spectra_iters;  // iterations with spectra (empty: all)
+    std::vector<int> pcg_iters;      // iterations with measurement PCG (empty: all)
+    std::vector<int> pcg_phases;     // phases with measurement PCG (0 predictor, 1 corrector)
+    int use_max_iters = 300;         // PCG cap in use mode
     bool self_control = true;        // U_new against itself, once
     bool self_done = false;
     int pcg_max_iters = 300;

@@ -447,6 +447,9 @@ namespace lab235
     st.stale_S = parse_ints(std::getenv("LAB235_STALE_S"), {1});
     st.stale_pcg = parse_ints(std::getenv("LAB235_STALE_PCG"), {1, 2, 4});
     st.spectra_iters = parse_ints(std::getenv("LAB235_SPECTRA_ITERS"), {});
+    st.pcg_iters = parse_ints(std::getenv("LAB235_PCG_ITERS"), st.spectra_iters);
+    st.pcg_phases = parse_ints(std::getenv("LAB235_PCG_PHASES"), {0, 1});
+    st.use_max_iters = env_int("LAB235_USE_MAX", 300);
     st.self_control = env_int("LAB235_SELF", 1) != 0;
     st.pcg_max_iters = env_int("LAB235_PCG_MAX", 300);
     st.pcg_floor_bits = env_int("LAB235_FLOOR_BITS", 64);
@@ -603,9 +606,15 @@ namespace lab235
     if(st.warm.empty())
       st.warm.resize(st.keep + 1);
     // measurement runs
+    const bool measure_here
+      = (st.pcg_iters.empty()
+         || std::find(st.pcg_iters.begin(), st.pcg_iters.end(), st.iteration)
+              != st.pcg_iters.end())
+        && std::find(st.pcg_phases.begin(), st.pcg_phases.end(), st.phase)
+             != st.pcg_phases.end();
     for(int s : st.stale_pcg)
       {
-        if(s < 1 || size_t(s) > st.Q_hist.size())
+        if(!measure_here || s < 1 || size_t(s) > st.Q_hist.size())
           continue;
         El::DistMatrix<El::BigFloat> x(rhs.Grid());
         const El::DistMatrix<El::BigFloat> *x0 = nullptr;
@@ -655,8 +664,11 @@ namespace lab235
             const El::DistMatrix<El::BigFloat> *x0 = nullptr;
             if(st.warm_corrector && st.phase == 1 && st.warm[0].Height() > 0)
               x0 = &st.warm[0];
+            int saved = st.pcg_max_iters;
+            st.pcg_max_iters = st.use_max_iters;
             auto res = pcg(P, work_N, work_P, st.Q_hist[s - 1], rhs, x_exact,
                            x0, stop_abs, x, "use", s, p_norm);
+            st.pcg_max_iters = saved;
             if(st.phase == 0)
               st.warm[0] = x;
             // not reached within pcg_max_iters: keep SDPB's exact dy (logged)
