@@ -22,6 +22,14 @@ struct Solver_Parameters
   // Experimental (lab #164): store the free variable matrix B compactly
   // (nonzero elements only), see sdp_solve/Sparse_Block_Matrix.hxx
   bool sparse_B = false;
+  // Experimental (lab #228, tail without restarts): when a dual feasible
+  // jump is detected after at most dual_jump_extra_within steps of this
+  // run, keep iterating dual_jump_extra_iterations more steps before
+  // terminating with DualFeasibleJumpDetected. Every iterate after the
+  // jump stays dual feasible, so its functional is as valid as the one at
+  // the jump, at a smaller mu. 0 (default): stop at the jump, as before.
+  int64_t dual_jump_extra_iterations = 0;
+  int64_t dual_jump_extra_within = std::numeric_limits<int64_t>::max();
   size_t precision;
 
   El::BigFloat duality_gap_threshold, primal_error_threshold,

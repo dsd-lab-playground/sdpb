@@ -66,6 +66,21 @@ boost::program_options::options_description Solver_Parameters::options()
     "enough. Try increasing either dualErrorThreshold or precision "
     "and run from the latest checkpoint.");
   result.add_options()(
+    "dualFeasibleJumpExtraIterations",
+    boost::program_options::value<int64_t>(&dual_jump_extra_iterations)
+      ->default_value(0),
+    "Experimental: with detectDualFeasibleJump, after a dual feasible jump "
+    "keep iterating this many more steps (as long as the iterate stays dual "
+    "feasible) before terminating with 'dual feasible jump detected'. The "
+    "functional written at the end is then the one of the last iterate.");
+  result.add_options()(
+    "dualFeasibleJumpExtraWithin",
+    boost::program_options::value<int64_t>(&dual_jump_extra_within)
+      ->default_value(std::numeric_limits<int64_t>::max()),
+    "Experimental: apply dualFeasibleJumpExtraIterations only if the jump "
+    "came within this many steps of the start of this run (e.g. 2: only "
+    "in hot-started runs that jump at once).");
+  result.add_options()(
     "maxIterations",
     boost::program_options::value<int64_t>(&max_iterations)->default_value(500),
     "Maximum number of iterations to run the solver.");
@@ -187,6 +202,12 @@ boost::property_tree::ptree to_property_tree(const Solver_Parameters &p)
   result.put("findDualFeasible", p.find_dual_feasible);
   result.put("detectPrimalFeasibleJump", p.detect_primal_feasible_jump);
   result.put("detectDualFeasibleJump", p.detect_dual_feasible_jump);
+  if(p.dual_jump_extra_iterations != 0)
+    {
+      result.put("dualFeasibleJumpExtraIterations",
+                 p.dual_jump_extra_iterations);
+      result.put("dualFeasibleJumpExtraWithin", p.dual_jump_extra_within);
+    }
   result.put("precision", p.precision);
   result.put("precision_actual", mpf_get_default_prec());
   result.put("dualityGapThreshold", p.duality_gap_threshold);
@@ -238,5 +259,10 @@ std::ostream &operator<<(std::ostream &os, const Solver_Parameters &p)
      << "maxComplementarity           = " << p.max_complementarity << '\n'
      << "initialCheckpointDir         = " << p.checkpoint_in << '\n'
      << "checkpointDir                = " << p.checkpoint_out << '\n';
+  if(p.dual_jump_extra_iterations != 0)
+    os << "dualFeasibleJumpExtraIterations = " << p.dual_jump_extra_iterations
+       << '\n'
+       << "dualFeasibleJumpExtraWithin  = " << p.dual_jump_extra_within
+       << '\n';
   return os;
 }

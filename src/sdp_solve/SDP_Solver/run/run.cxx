@@ -52,7 +52,8 @@ void compute_feasible_and_termination(
   const std::chrono::time_point<std::chrono::high_resolution_clock>
     &solver_start_time,
   bool &is_primal_and_dual_feasible,
-  SDP_Solver_Terminate_Reason &terminate_reason, bool &terminate_now);
+  SDP_Solver_Terminate_Reason &terminate_reason, bool &terminate_now,
+  int64_t &dual_jump_iteration);
 
 void compute_dual_residues_and_error(
   const Block_Info &block_info, const SDP &sdp, const Block_Vector &y,
@@ -319,6 +320,8 @@ SDP_Solver_Terminate_Reason SDP_Solver::run(
     }
 
   print_header(verbosity);
+  // lab #228: see compute_feasible_and_termination
+  int64_t dual_jump_iteration = 0;
   for(size_t iteration = 1;; ++iteration)
     {
       Scoped_Timer iteration_timer(timers,
@@ -417,7 +420,8 @@ SDP_Solver_Terminate_Reason SDP_Solver::run(
       compute_feasible_and_termination(
         parameters, primal_error(), dual_error, duality_gap,
         primal_step_length, dual_step_length, iteration, start_time,
-        is_primal_and_dual_feasible, terminate_reason, terminate_now);
+        is_primal_and_dual_feasible, terminate_reason, terminate_now,
+        dual_jump_iteration);
       if(terminate_now)
         {
           break;
@@ -454,8 +458,13 @@ SDP_Solver_Terminate_Reason SDP_Solver::run(
 
       if(terminate_now)
         {
+          // lab #228: during the extra steps after a dual feasible jump the
+          // point (not updated by this step) is dual feasible: keep that
+          // result.
           terminate_reason
-            = SDP_Solver_Terminate_Reason::MaxComplementarityExceeded;
+            = dual_jump_iteration > 0
+                ? SDP_Solver_Terminate_Reason::DualFeasibleJumpDetected
+                : SDP_Solver_Terminate_Reason::MaxComplementarityExceeded;
           break;
         }
       Scoped_Timer print_iteration_timer(timers, "print_iteration");
