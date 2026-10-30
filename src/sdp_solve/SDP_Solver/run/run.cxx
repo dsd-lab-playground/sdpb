@@ -1,3 +1,4 @@
+#include "step/lab235/lab235.hxx"
 #include "save_c_minus_By.hxx"
 #include "sdp_solve/memory_estimates.hxx"
 #include "bigint_syrk/BigInt_Shared_Memory_Syrk_Context.hxx"
@@ -193,6 +194,7 @@ SDP_Solver_Terminate_Reason SDP_Solver::run(
   SDP_Solver_Terminate_Reason terminate_reason(
     SDP_Solver_Terminate_Reason::MaxIterationsExceeded);
   Scoped_Timer solver_timer(timers, "run");
+  lab235::begin_run(); // lab (agent) #235: the timing pass and the real solve are separate runs
   Scoped_Timer initialize_timer(timers, "initialize");
   if(verbosity >= Verbosity::regular && El::mpi::Rank() == 0)
     {

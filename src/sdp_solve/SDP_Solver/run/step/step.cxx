@@ -3,6 +3,7 @@
 #include "sdp_solve/SDP_Solver.hxx"
 #include "sdp_solve/SDP_Solver/run/bigint_syrk/BigInt_Shared_Memory_Syrk_Context.hxx"
 #include "sdp_solve/memory_estimates.hxx"
+#include "lab235/lab235.hxx"
 
 void scale_multiply_add(const El::BigFloat &alpha,
                         const Block_Diagonal_Matrix &A,
@@ -74,6 +75,8 @@ void SDP_Solver::step(
   El::Zero(block_timings_ms);
 
   El::BigFloat beta_predictor;
+  // lab (agent) #235: off unless LAB235_DIR is set
+  lab235::begin_step(primal_error(), parameters.primal_error_threshold);
 
   // Search direction: These quantities have the same structure
   // as (x, X, y, Y). They are computed twice each iteration:
@@ -126,6 +129,7 @@ void SDP_Solver::step(
                                        schur_off_diagonal, bigint_syrk_context,
                                        Q, timers, block_timings_ms,
                                        parameters.multimodular_trsm, verbosity);
+    lab235::after_factor(block_info, schur_complement_cholesky, Q);
 
     // Calculate matrix product -XY
     // It will be reused for mu, R-err, compute_search_direction().
@@ -175,6 +179,7 @@ void SDP_Solver::step(
     {
       Scoped_Timer corrector_timer(timers,
                                    "computeSearchDirection(betaCorrector)");
+      lab235::state().phase = 1;
       beta_corrector = corrector_centering_parameter(
         parameters, X, dX, Y, dY, mu, is_primal_and_dual_feasible,
         total_psd_rows);
@@ -189,6 +194,7 @@ void SDP_Solver::step(
     update_cond_numbers(Q, block_info, schur_complement_cholesky, X_cholesky,
                         Y_cholesky, timers, Q_cond_number,
                         max_block_cond_number, max_block_cond_number_name);
+    lab235::end_step(schur_complement_cholesky, Q);
   }
   // Compute step-lengths that preserve positive definiteness of X, Y
   primal_step_length

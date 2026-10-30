@@ -2,6 +2,7 @@
 #include "sdp_solve/SDP_Solver.hxx"
 #include "sdp_solve/lower_triangular_transpose_solve.hxx"
 #include "sdpb_util/copy_matrix.hxx"
+#include "../lab235/lab235.hxx"
 
 // Solve the Schur complement equation for dx, dy.
 //
@@ -23,6 +24,13 @@ void solve_schur_complement_equation(
 
   El::DistMatrix<El::BigFloat> dy_dist;
   Zeros(dy_dist, Q.Height(), 1);
+  // lab (agent) #235: p = b - B^T x is the sum of dy's blocks on entry
+  El::DistMatrix<El::BigFloat> lab_p, lab_rhs;
+  if(lab235::enabled())
+    {
+      Zeros(lab_p, Q.Height(), 1);
+      lab235::sum_blocks(dy, lab_p);
+    }
   {
     El::Matrix<El::BigFloat> dy_sum;
     Zeros(dy_sum, Q.Height(), 1);
@@ -59,10 +67,14 @@ void solve_schur_complement_equation(
         }
   }
   dy_dist.ProcessQueues();
+  if(lab235::enabled())
+    lab_rhs = dy_dist;
 
   // dy_dist = Q^{-1}.dy_dist
   El::cholesky::SolveAfter(El::UpperOrLowerNS::UPPER,
                            El::OrientationNS::NORMAL, Q, dy_dist);
+  if(lab235::enabled())
+    lab235::solve_hook(schur_off_diagonal, dy, dx, Q, lab_rhs, lab_p, dy_dist);
   El::DistMatrix<El::BigFloat, El::STAR, El::STAR> dy_local(dy_dist);
 
   // dx += schur_off_diagonal.dy
