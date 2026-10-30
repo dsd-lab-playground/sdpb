@@ -34,6 +34,14 @@ boost::program_options::options_description Solver_Parameters::options()
     "El::Trsm. About 2x faster per iteration on large SDPs, with backward "
     "errors at the level of El's.");
   result.add_options()(
+    "multimodularCholeskyQ",
+    boost::program_options::value<int64_t>(&multimodular_cholesky_Q)
+      ->default_value(0),
+    "Experimental: compute the Cholesky decomposition of Q as El does "
+    "(same panels and redistributions), but with the trailing updates by "
+    "multimodular BLAS. The value is the panel width (e.g. 128, El's "
+    "default); 0 (default) uses El::Cholesky.");
+  result.add_options()(
     "sparseB",
     boost::program_options::bool_switch(&sparse_B)->default_value(false),
     "Experimental: store the free variable matrix B with its nonzero "
@@ -183,6 +191,7 @@ boost::property_tree::ptree to_property_tree(const Solver_Parameters &p)
   result.put("checkpointInterval", p.checkpoint_interval);
   result.put("findPrimalFeasible", p.find_primal_feasible);
   result.put("multimodularTrsm", p.multimodular_trsm);
+  result.put("multimodularCholeskyQ", p.multimodular_cholesky_Q);
   result.put("sparseB", p.sparse_B);
   result.put("findDualFeasible", p.find_dual_feasible);
   result.put("detectPrimalFeasibleJump", p.detect_primal_feasible_jump);
@@ -213,6 +222,7 @@ std::ostream &operator<<(std::ostream &os, const Solver_Parameters &p)
      << "maxSharedMemory              = "
      << pretty_print_bytes(p.max_shared_memory_bytes, true) << '\n'
      << "multimodularTrsm             = " << p.multimodular_trsm << '\n'
+     << "multimodularCholeskyQ        = " << p.multimodular_cholesky_Q << '\n'
      << "sparseB                      = " << p.sparse_B << '\n'
      << "findPrimalFeasible           = " << p.find_primal_feasible << '\n'
      << "findDualFeasible             = " << p.find_dual_feasible << '\n'

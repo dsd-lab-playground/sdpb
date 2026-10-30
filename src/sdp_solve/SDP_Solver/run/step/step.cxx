@@ -22,7 +22,7 @@ void initialize_schur_complement_solver(
   BigInt_Shared_Memory_Syrk_Context &bigint_syrk_context,
   El::DistMatrix<El::BigFloat> &Q, Timers &timers,
   El::Matrix<int32_t> &block_timings_ms, bool multimodular_trsm,
-  Verbosity verbosity);
+  int64_t multimodular_cholesky_Q, Verbosity verbosity);
 
 void compute_search_direction(
   const Block_Info &block_info, const SDP &sdp, const SDP_Solver &solver,
@@ -33,7 +33,7 @@ void compute_search_direction(
   const El::BigFloat &mu, const Block_Vector &primal_residue_p,
   const bool &is_corrector_phase, const El::DistMatrix<El::BigFloat> &Q,
   Block_Vector &dx, Block_Diagonal_Matrix &dX, Block_Vector &dy,
-  Block_Diagonal_Matrix &dY);
+  Block_Diagonal_Matrix &dY, Timers &timers);
 
 El::BigFloat predictor_centering_parameter(const Solver_Parameters &parameters,
                                            const bool is_primal_dual_feasible);
@@ -125,7 +125,9 @@ void SDP_Solver::step(
                                        grid, schur_complement_cholesky,
                                        schur_off_diagonal, bigint_syrk_context,
                                        Q, timers, block_timings_ms,
-                                       parameters.multimodular_trsm, verbosity);
+                                       parameters.multimodular_trsm,
+                                       parameters.multimodular_cholesky_Q,
+                                       verbosity);
 
     // Calculate matrix product -XY
     // It will be reused for mu, R-err, compute_search_direction().
@@ -168,7 +170,8 @@ void SDP_Solver::step(
       compute_search_direction(block_info, sdp, *this, minus_XY,
                                schur_complement_cholesky, schur_off_diagonal,
                                X_cholesky, beta_predictor, mu,
-                               primal_residue_p, false, Q, dx, dX, dy, dY);
+                               primal_residue_p, false, Q, dx, dX, dy, dY,
+                               timers);
     }
 
     // Compute the corrector solution for (dx, dX, dy, dY)
@@ -182,7 +185,8 @@ void SDP_Solver::step(
       compute_search_direction(block_info, sdp, *this, minus_XY,
                                schur_complement_cholesky, schur_off_diagonal,
                                X_cholesky, beta_corrector, mu,
-                               primal_residue_p, true, Q, dx, dX, dy, dY);
+                               primal_residue_p, true, Q, dx, dX, dy, dY,
+                               timers);
     }
 
     // Calculate condition numbers for Cholesky matrices

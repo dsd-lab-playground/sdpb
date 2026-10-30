@@ -99,6 +99,7 @@ def build(bld):
                          'src/sdp_solve/SDP_Solver/run/multimodular/multimodular_gemm.cxx',
                          'src/sdp_solve/SDP_Solver/run/multimodular/blocked_cholesky_trsm.cxx',
                          'src/sdp_solve/SDP_Solver/run/multimodular/Multimodular_Block_Factor.cxx',
+                         'src/sdp_solve/SDP_Solver/run/multimodular/multimodular_cholesky_dist.cxx',
                          'src/sdp_solve/SDP_Solver/run/step/compute_search_direction/compute_search_direction.cxx',
                          'src/sdp_solve/SDP_Solver/run/step/compute_search_direction/cholesky_solve.cxx',
                          'src/sdp_solve/SDP_Solver/run/step/compute_search_direction/compute_schur_RHS.cxx',
@@ -131,6 +132,15 @@ def build(bld):
                         'src/sdpb/SDPB_Parameters.cxx',
                         'src/sdpb/save_solution.cxx'],
                 target='sdpb',
+                cxxflags=default_flags,
+                defines=default_defines,
+                includes=default_includes,
+                use=use_packages + ['sdp_solve', 'mpsolve']
+                )
+
+    # lab #226: Cholesky_Q benchmark (El vs multimodular trailing update)
+    bld.program(source=['src/qchol_bench/main.cxx'],
+                target='qchol_bench',
                 cxxflags=default_flags,
                 defines=default_defines,
                 includes=default_includes,

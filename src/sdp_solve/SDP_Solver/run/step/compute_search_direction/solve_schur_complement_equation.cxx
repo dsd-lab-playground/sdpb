@@ -2,6 +2,9 @@
 #include "sdp_solve/SDP_Solver.hxx"
 #include "sdp_solve/lower_triangular_transpose_solve.hxx"
 #include "sdpb_util/copy_matrix.hxx"
+#include "sdpb_util/Timers/Timers.hxx"
+
+#include <optional>
 
 // Solve the Schur complement equation for dx, dy.
 //
@@ -16,10 +19,20 @@
 void solve_schur_complement_equation(
   const Block_Diagonal_Matrix &schur_complement_cholesky,
   const Block_Matrix &schur_off_diagonal,
-  const El::DistMatrix<El::BigFloat> &Q, Block_Vector &dx, Block_Vector &dy)
+  const El::DistMatrix<El::BigFloat> &Q, Block_Vector &dx, Block_Vector &dy,
+  Timers *timers)
 {
+  // lab #226: sub-timers (no change to the arithmetic)
+  std::optional<Scoped_Timer> phase;
+  auto begin = [&](const char *name) {
+    phase.reset();
+    if(timers != nullptr)
+      phase.emplace(*timers, name);
+  };
   // dx = schur_complement^{-1}.dx
+  begin("L_solve");
   lower_triangular_solve(schur_complement_cholesky, dx);
+  begin("dy_sum");
 
   El::DistMatrix<El::BigFloat> dy_dist;
   Zeros(dy_dist, Q.Height(), 1);
@@ -48,6 +61,7 @@ void solve_schur_complement_equation(
       }
 
     // Send out updates for dy
+    begin("dy_queue");
     El::BigFloat zero(0);
     for(int64_t row = 0; row < dy_sum.Height(); ++row)
       for(int64_t column = 0; column < dy_sum.Width(); ++column)
@@ -58,12 +72,16 @@ void solve_schur_complement_equation(
             }
         }
   }
+  begin("dy_process_queues");
   dy_dist.ProcessQueues();
 
   // dy_dist = Q^{-1}.dy_dist
+  begin("Q_solve");
   El::cholesky::SolveAfter(El::UpperOrLowerNS::UPPER,
                            El::OrientationNS::NORMAL, Q, dy_dist);
+  begin("dy_star_star");
   El::DistMatrix<El::BigFloat, El::STAR, El::STAR> dy_local(dy_dist);
+  begin("dx_update");
 
   // dx += schur_off_diagonal.dy
   for(size_t block = 0; block < schur_off_diagonal.blocks.size(); ++block)
@@ -75,5 +93,7 @@ void solve_schur_complement_equation(
     }
 
   // dx = schur_complement^{-T}.dx
+  begin("LT_solve");
   lower_triangular_transpose_solve(schur_complement_cholesky, dx);
+  phase.reset();
 }
