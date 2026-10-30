@@ -13,6 +13,7 @@
     "checkpointInterval": "3600",
     "findPrimalFeasible": "false",
     "multimodularTrsm": "false",
+    "multimodularCholeskyQ": "0",
     "sparseB": "false",
     "findDualFeasible": "false",
     "detectPrimalFeasibleJump": "false",
