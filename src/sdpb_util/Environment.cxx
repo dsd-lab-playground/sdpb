@@ -1,5 +1,7 @@
 #include "Environment.hxx"
 
+#include <cstdlib>
+
 #include "Boost_Float.hxx"
 #include "Proc_Meminfo.hxx"
 #include "assert.hxx"
@@ -59,8 +61,22 @@ void Environment::initialize()
   std::signal(SIGTERM, handle_sigterm);
 
   // Create shared memory communicator (all ranks on a node)
-  MPI_Comm_split_type(MPI_COMM_WORLD, MPI_COMM_TYPE_SHARED, 0, MPI_INFO_NULL,
-                      &comm_shared_mem.comm);
+  // Test hook (lab #226): SDPB_FAKE_NODES=k splits the ranks of one machine
+  // into k contiguous groups that SDPB treats as nodes, so the multi-node
+  // code paths (e.g. bigint_syrk's restore_and_reduce) can run on one host.
+  // MPI shared-memory windows still work inside each group.
+  const char *fake_nodes_env = std::getenv("SDPB_FAKE_NODES");
+  const int fake_nodes
+    = fake_nodes_env != nullptr ? std::atoi(fake_nodes_env) : 0;
+  if(fake_nodes > 1)
+    {
+      const int per_node = (El::mpi::Size() + fake_nodes - 1) / fake_nodes;
+      MPI_Comm_split(MPI_COMM_WORLD, El::mpi::Rank() / per_node,
+                     El::mpi::Rank(), &comm_shared_mem.comm);
+    }
+  else
+    MPI_Comm_split_type(MPI_COMM_WORLD, MPI_COMM_TYPE_SHARED, 0,
+                        MPI_INFO_NULL, &comm_shared_mem.comm);
 
   // Determine node_index and num_nodes
   {
