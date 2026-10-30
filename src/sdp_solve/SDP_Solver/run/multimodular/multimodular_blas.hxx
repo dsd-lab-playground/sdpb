@@ -20,6 +20,8 @@
 #include <cstddef>
 #include <vector>
 
+struct Timers;
+
 struct Multimodular_Blas_Config
 {
   // Diagonal blocks of at most this size are processed in BigFloat
@@ -82,6 +84,31 @@ void multimodular_gemm_sub(El::Matrix<El::BigFloat> &C,
 
 // B := L^{-1} B, L lower triangular with nonzero diagonal
 // (only the lower triangle of L is read).
+void multimodular_gemm_sub(El::Matrix<El::BigFloat> &C,
+                           const El::Matrix<El::BigFloat> &A,
+                           El::Orientation orientation_B,
+                           const El::Matrix<El::BigFloat> &B,
+                           const std::vector<int> &row_start,
+                           const std::vector<int> &row_end,
+                           const Multimodular_Blas_Config &config,
+                           Multimodular_Blas_Timings &timings);
+
+// Cholesky of a distributed matrix, A = U^T U (upper), as
+// El::cholesky::UpperVariant3Blocked, with the trailing update
+// A22 -= A12^T A12 by multimodular BLAS (lab #226).
+// block_size <= 0: El::Blocksize(). mm_diag: diagonal blocks by
+// multimodular_cholesky_lower instead of El::Cholesky.
+struct Multimodular_Cholesky_Dist_Timings
+{
+  double diag = 0, panel = 0, redist = 0, update = 0;
+  Multimodular_Blas_Timings mm;
+};
+void multimodular_cholesky_upper_dist(El::DistMatrix<El::BigFloat> &A,
+                                      int block_size, bool mm_diag,
+                                      const Multimodular_Blas_Config &config,
+                                      Multimodular_Cholesky_Dist_Timings &t,
+                                      Timers *timers = nullptr);
+
 void multimodular_trsm_left_lower(const El::Matrix<El::BigFloat> &L,
                                   El::Matrix<El::BigFloat> &B,
                                   const Multimodular_Blas_Config &config,

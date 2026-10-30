@@ -19,6 +19,9 @@ struct Solver_Parameters
   // Per-block Cholesky and L^{-1}B by multimodular BLAS,
   // see sdp_solve/SDP_Solver/run/multimodular/Readme.md
   bool multimodular_trsm = false;
+  // Experimental (lab #226): Cholesky of Q with the trailing update by
+  // multimodular BLAS, panel width = this value (0: El::Cholesky)
+  int64_t multimodular_cholesky_Q = 0;
   // Experimental (lab #164): store the free variable matrix B compactly
   // (nonzero elements only), see sdp_solve/Sparse_Block_Matrix.hxx
   bool sparse_B = false;
