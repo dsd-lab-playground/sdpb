@@ -16,8 +16,9 @@
 namespace
 {
   // Grid on world ranks first, ..., first + r - 1 (mod size), viewed by all
-  // ranks, h x (r / h) as in Q_Grids
-  std::unique_ptr<El::Grid> sub_grid(const int first, const int r)
+  // ranks, h x (r / h) as in Q_Grids, or height x (r / height)
+  std::unique_ptr<El::Grid>
+  sub_grid(const int first, const int r, const int height_in = 0)
   {
     const int size = El::mpi::Size(El::mpi::COMM_WORLD);
     std::vector<int> ranks(r);
@@ -26,6 +27,8 @@ namespace
     int height = int(std::sqrt(double(r)));
     while(r % height != 0)
       --height;
+    if(height_in > 0)
+      height = height_in;
     El::mpi::Group world, owners;
     El::mpi::CommGroup(El::mpi::COMM_WORLD, world);
     El::mpi::Incl(world, r, ranks.data(), owners);
@@ -73,8 +76,8 @@ namespace
     return true;
   }
 
-  // Grids of a test: all ranks, and sub-grids of 1, size/2 and size-1 ranks
-  // starting at rank 0 or 1
+  // Grids of a test: sub-grids of 1, size/2 and size-1 ranks starting at
+  // rank 0 or 1, and all ranks as size x 1 and 1 x size
   std::vector<std::unique_ptr<El::Grid>> test_grids()
   {
     const int size = El::mpi::Size(El::mpi::COMM_WORLD);
@@ -83,6 +86,11 @@ namespace
       for(const int first : {0, 1})
         if(r >= 1 && first < size)
           grids.push_back(sub_grid(first, r));
+    if(size > 1)
+      {
+        grids.push_back(sub_grid(0, size, size));
+        grids.push_back(sub_grid(0, size, 1));
+      }
     return grids;
   }
 }

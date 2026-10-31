@@ -20,12 +20,15 @@
 // r = k * (ranks per node) gives the ranks of k whole nodes (with
 // SDPB_Q_GRID_ORDER=spread: (rank on node, node) order, so r = k * (number of
 // nodes) gives k ranks on every node). The grid is
-// h x (r / h) with h the largest divisor of r not above sqrt(r).
-// World rank 0 is always in both sub-grids.
+// h x (r / h) with h the largest divisor of r not above sqrt(r)
+// (experiment: SDPB_Q_CHOLESKY_GRID_HEIGHT / SDPB_Q_SOLVE_GRID_HEIGHT set h if
+// it divides r; with r >= number of ranks they make a grid of all ranks with
+// that height, e.g. h = ranks per node, so that each process column is one
+// node). World rank 0 is always in both sub-grids.
 class Q_Grids
 {
 public:
-  // r <= 0 or r >= number of ranks: no sub-grid.
+  // r <= 0 or r >= number of ranks: no sub-grid (unless a height is set).
   // solve_ranks <= 0 or == cholesky_ranks: solves on the Cholesky grid.
   Q_Grids(const Environment &env, int64_t cholesky_ranks,
           int64_t solve_ranks);

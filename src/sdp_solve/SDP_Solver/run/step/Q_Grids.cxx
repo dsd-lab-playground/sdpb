@@ -11,12 +11,19 @@
 namespace
 {
   // Grid of the first r ranks in (node, rank on node) order; nullptr if
-  // r <= 0 or r >= number of ranks.
-  std::unique_ptr<El::Grid> make_sub_grid(const Environment &env, int64_t r)
+  // r <= 0, or r >= number of ranks and the environment variable height_env
+  // is unset. height_env (experiment): the grid's height, if it divides r;
+  // with r >= number of ranks it makes a grid of all ranks with that height
+  // (e.g. the ranks per node: then each process column is one node).
+  std::unique_ptr<El::Grid>
+  make_sub_grid(const Environment &env, int64_t r, const char *height_env)
   {
     const int num_ranks = El::mpi::Size(El::mpi::COMM_WORLD);
-    if(r <= 0 || r >= num_ranks)
+    const char *h_env = std::getenv(height_env);
+    const int custom_height = h_env != nullptr ? std::atoi(h_env) : 0;
+    if(r <= 0 || (r >= num_ranks && custom_height <= 0))
       return nullptr;
+    r = std::min<int64_t>(r, num_ranks);
 
     // (node index, rank on node) of every world rank
     const int mine[2] = {env.node_index(), env.comm_shared_mem.Rank()};
@@ -41,6 +48,11 @@ namespace
     int height = int(std::sqrt(double(r)));
     while(r % height != 0)
       --height;
+    if(custom_height > 0 && r % custom_height == 0)
+      height = custom_height;
+    else if(custom_height > 0 && El::mpi::Rank() == 0)
+      El::Output("Warning: ", height_env, "=", custom_height,
+                 " does not divide ", r, "; using height ", height);
 
     El::mpi::Group world_group, owners;
     El::mpi::CommGroup(El::mpi::COMM_WORLD, world_group);
@@ -55,10 +67,11 @@ namespace
 
 Q_Grids::Q_Grids(const Environment &env, const int64_t cholesky_ranks,
                  const int64_t solve_ranks)
-    : cholesky_(make_sub_grid(env, cholesky_ranks))
+    : cholesky_(
+        make_sub_grid(env, cholesky_ranks, "SDPB_Q_CHOLESKY_GRID_HEIGHT"))
 {
   if(solve_ranks > 0 && solve_ranks != cholesky_ranks)
-    solve_ = make_sub_grid(env, solve_ranks);
+    solve_ = make_sub_grid(env, solve_ranks, "SDPB_Q_SOLVE_GRID_HEIGHT");
   if(El::mpi::Rank() == 0 && (cholesky_ || solve_))
     {
       auto describe = [](const El::Grid *g) {
