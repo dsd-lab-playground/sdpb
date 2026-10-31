@@ -69,6 +69,8 @@ namespace lab235
     int phase = 0;                   // 0 predictor, 1 corrector
     std::deque<El::DistMatrix<El::BigFloat>> Q_hist; // newest first
     std::deque<Block_Diagonal_Matrix> S_hist;        // newest first
+    bool prec_inv = false;                           // LAB235_PREC_INV: preconditioner as U^-1 (U^-T r)
+    std::deque<El::DistMatrix<El::BigFloat>> Qinv_hist; // U^-1 of Q_hist's factors
     std::vector<El::DistMatrix<El::BigFloat>> warm;  // per stale level
     bool check_BL = false;           // LAB235_CHECK_BL: Q v via B and L as well (timing + agreement)
     const SDP *sdp = nullptr;                          // set in after_factor for this step

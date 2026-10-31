@@ -359,8 +359,29 @@ namespace lab235
                    const El::DistMatrix<El::BigFloat> *x0,
                    const El::BigFloat &stop_abs, El::DistMatrix<El::BigFloat> &x,
                    const std::string &label, int s, const El::BigFloat &p_norm,
-                   int nd = 0)
+                   int nd = 0, const El::DistMatrix<El::BigFloat> *Uinv = nullptr)
     {
+      // preconditioner z = (U^T U)^{-1} r: two triangular solves, or with the explicit
+      // inverse two matrix-vector products z = U^-1 (U^-T r)
+      auto precondition = [&](const El::DistMatrix<El::BigFloat> &rr,
+                              El::DistMatrix<El::BigFloat> &zz) {
+        if(Uinv != nullptr)
+          {
+            El::DistMatrix<El::BigFloat> tt(rr.Grid());
+            El::Zeros(tt, rr.Height(), 1);
+            El::Zeros(zz, rr.Height(), 1);
+            El::Gemv(El::OrientationNS::TRANSPOSE, El::BigFloat(1), *Uinv, rr,
+                     El::BigFloat(0), tt);
+            El::Gemv(El::OrientationNS::NORMAL, El::BigFloat(1), *Uinv, tt,
+                     El::BigFloat(0), zz);
+          }
+        else
+          {
+            zz = rr;
+            El::cholesky::SolveAfter(El::UpperOrLowerNS::UPPER,
+                                     El::OrientationNS::NORMAL, U_old, zz);
+          }
+      };
       auto &st = state();
       auto t0 = Clock::now();
       double t_mv = 0, t_pc = 0;
@@ -403,11 +424,9 @@ namespace lab235
         return rn;
       };
       El::BigFloat rn = record();
-      z = r;
       {
         auto t1 = Clock::now();
-        El::cholesky::SolveAfter(El::UpperOrLowerNS::UPPER,
-                                 El::OrientationNS::NORMAL, U_old, z);
+        precondition(r, z);
         t_pc += seconds_since(t1);
         ++n_pc;
         round_mat(z, nd);
@@ -442,10 +461,8 @@ namespace lab235
           round_mat(r, nd);
           rn = record();
           res.iterations = k;
-          z = r;
           t1 = Clock::now();
-          El::cholesky::SolveAfter(El::UpperOrLowerNS::UPPER,
-                                   El::OrientationNS::NORMAL, U_old, z);
+          precondition(r, z);
           t_pc += seconds_since(t1);
           ++n_pc;
           round_mat(z, nd);
@@ -538,6 +555,7 @@ namespace lab235
     st.pcg_doubles = parse_ints(std::getenv("LAB235_PCG_DOUBLES"), {});
     st.pcg_doubles_stale = env_int("LAB235_PCG_DOUBLES_STALE", 1);
     st.check_BL = env_int("LAB235_CHECK_BL", 1) != 0;
+    st.prec_inv = env_int("LAB235_PREC_INV", 0) != 0;
     st.self_control = env_int("LAB235_SELF", 1) != 0;
     st.pcg_max_iters = env_int("LAB235_PCG_MAX", 300);
     st.pcg_floor_bits = env_int("LAB235_FLOOR_BITS", 64);
@@ -589,6 +607,7 @@ namespace lab235
     // the previous run's matrices may live on a grid that no longer exists: leak them
     (new std::deque<El::DistMatrix<El::BigFloat>>)->swap(st.Q_hist);
     (new std::deque<Block_Diagonal_Matrix>)->swap(st.S_hist);
+    (new std::deque<El::DistMatrix<El::BigFloat>>)->swap(st.Qinv_hist);
     (new std::vector<El::DistMatrix<El::BigFloat>>)->swap(st.warm);
     std::ostringstream os;
     os << "{\"kind\":\"run\",\"run\":" << st.run
@@ -653,6 +672,20 @@ namespace lab235
     El::MakeTrapezoidal(El::UpperOrLowerNS::UPPER, st.Q_hist.front());
     while(st.Q_hist.size() > st.keep)
       st.Q_hist.pop_back();
+    if(st.prec_inv)
+      {
+        auto t0 = Clock::now();
+        st.Qinv_hist.emplace_front(st.Q_hist.front());
+        El::TriangularInverse(El::UpperOrLowerNS::UPPER,
+                              El::UnitOrNonUnitNS::NON_UNIT, st.Qinv_hist.front());
+        El::MakeTrapezoidal(El::UpperOrLowerNS::UPPER, st.Qinv_hist.front());
+        while(st.Qinv_hist.size() > st.keep)
+          st.Qinv_hist.pop_back();
+        double t = seconds_since(t0);
+        if(is_root())
+          write_line("{\"kind\":\"triinv\",\"it\":" + std::to_string(st.iteration)
+                     + ",\"t\":" + fmt(t) + "}");
+      }
     st.S_hist.emplace_front(schur_complement_cholesky);
     for(auto &blk : st.S_hist.front().blocks)
       El::MakeTrapezoidal(El::UpperOrLowerNS::LOWER, blk);
@@ -714,6 +747,13 @@ namespace lab235
             El::BigFloat(0), x, "measure", s, p_norm);
         if(st.phase == 0)
           st.warm[s] = x;
+      }
+    // stale-1 PCG with the explicit-inverse preconditioner (same operator, other application)
+    if(measure_here && st.prec_inv && !st.Qinv_hist.empty())
+      {
+        El::DistMatrix<El::BigFloat> x(rhs.Grid());
+        pcg(P, work_N, work_P, st.Q_hist[0], rhs, x_exact, nullptr,
+            El::BigFloat(0), x, "measure-inv", 1, p_norm, 0, &st.Qinv_hist[0]);
       }
     // the two matvec forms on v = rhs: agreement and time
     if(measure_here && st.check_BL && st.sdp != nullptr && st.L_now != nullptr)
@@ -812,8 +852,12 @@ namespace lab235
               x0 = &st.warm[0];
             int saved = st.pcg_max_iters;
             st.pcg_max_iters = st.use_max_iters;
+            const El::DistMatrix<El::BigFloat> *Uinv
+              = (st.prec_inv && size_t(s) <= st.Qinv_hist.size())
+                  ? &st.Qinv_hist[s - 1]
+                  : nullptr;
             auto res = pcg(P, work_N, work_P, st.Q_hist[s - 1], rhs, x_exact,
-                           x0, stop_abs, x, "use", s, p_norm);
+                           x0, stop_abs, x, "use", s, p_norm, 0, Uinv);
             st.pcg_max_iters = saved;
             if(st.phase == 0)
               st.warm[0] = x;
