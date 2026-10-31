@@ -43,6 +43,13 @@ dimension, precision, ranks) and waits.
 
 `people/lab/197-resident-sdpb/resident.py` in the bootstrap-speed repository is a minimal Python driver.
 
+`client/resident_client.py` (with `client/srun_sdpb.sh`) is a drop-in replacement for hyperion's `srun_sdpb.sh`: one
+resident process per checkpoint directory, started with the first call's arguments; every solve is sent with
+`"inherit": false`; blocks are re-read when their `block_data` file changed (inode, size, mtime), and the client starts
+a new resident process whenever the iterate in memory is not what `sdpb` would load (a `--noFinalCheckpoint` call, a
+checkpoint from elsewhere, a changed `checkpoint.json`, another fixed option). Its docstring states the rules; the lab's
+gate (bootstrap-speed#238) checks it bitwise against fresh `sdpb` processes.
+
 ## Commands
 
 | `cmd` | fields | does |
