@@ -38,9 +38,10 @@ boost::program_options::options_description Solver_Parameters::options()
     boost::program_options::value<int64_t>(&multimodular_cholesky_Q)
       ->default_value(0),
     "Experimental: compute the Cholesky decomposition of Q as El does "
-    "(same panels and redistributions), but with the trailing updates by "
-    "multimodular BLAS. The value is the panel width (e.g. 128, El's "
-    "default); 0 (default) uses El::Cholesky.");
+    "(same panels and redistributions), but with the diagonal blocks and "
+    "the trailing updates by multimodular BLAS. The value is the panel "
+    "width (64 was fastest on 5-10 Expanse nodes; El's default is 128); "
+    "0 (default) uses El::Cholesky.");
   result.add_options()(
     "sparseB",
     boost::program_options::bool_switch(&sparse_B)->default_value(false),
