@@ -1291,7 +1291,8 @@ namespace lab235
     // signed int64 digits of 48 bits, MPI_SUM). Integer sums do not depend
     // on the reduction order, so every rank gets the same out. out may be v.
     double t_exact_sum = 0;
-    void exact_sum(arb_srcptr v, slong n, slong bits, arb_ptr out)
+    void exact_sum(arb_srcptr v, slong n, slong bits, arb_ptr out,
+                   MPI_Comm comm = MPI_COMM_WORLD)
     {
       const auto t0 = std::chrono::steady_clock::now();
       std::vector<int> e(n);
@@ -1299,8 +1300,7 @@ namespace lab235
         e[j] = arf_is_zero(arb_midref(v + j))
                  ? INT_MIN
                  : int(arf_abs_bound_lt_2exp_si(arb_midref(v + j)));
-      MPI_Allreduce(MPI_IN_PLACE, e.data(), int(n), MPI_INT, MPI_MAX,
-                    MPI_COMM_WORLD);
+      MPI_Allreduce(MPI_IN_PLACE, e.data(), int(n), MPI_INT, MPI_MAX, comm);
       const slong K = bits / DIGIT_BITS + 1;
       std::vector<int64_t> d(size_t(n * K), 0);
       fmpz_t z;
@@ -1320,7 +1320,7 @@ namespace lab235
             d[j * K + k] = sgn * int64_t(mpz_bits(m, k * DIGIT_BITS, DIGIT_BITS));
         }
       MPI_Allreduce(MPI_IN_PLACE, d.data(), int(n * K), MPI_INT64_T, MPI_SUM,
-                    MPI_COMM_WORLD);
+                    comm);
       for(slong j = 0; j < n; ++j)
         {
           if(e[j] == INT_MIN)
@@ -1557,6 +1557,80 @@ namespace lab235
     }
   }
 
+  namespace
+  {
+    // #243 check (LAB235_MATVEC_CHECK=2): Q v = sum_j B_j^T S_j^-1 B_j v at
+    // `prec` bits without P_j = L_j^-1 B_j: rows of B_j (cached per run),
+    // the full L_j on every rank of the block (per iteration), B_j v summed
+    // exactly over the block's ranks, two triangular solves, B_j^T w.
+    std::vector<Rows> B_rows;
+    int B_rows_run = -1;
+    void matvec_BL(const SDP &sdp, const Block_Diagonal_Matrix &L,
+                   arb_srcptr v, arb_ptr out, slong N, slong prec)
+    {
+      auto &st = state();
+      if(B_rows_run != st.run)
+        {
+          for(auto &r : B_rows)
+            r.clear();
+          B_rows.assign(L.blocks.size(), Rows());
+          for(size_t b = 0; b < L.blocks.size(); ++b)
+            {
+              El::DistMatrix<El::BigFloat> scratch;
+              const auto &Bj = sdp.free_var_block(b, scratch);
+              El::DistMatrix<El::BigFloat, El::VC, El::STAR> rows(Bj);
+              rows_from(rows, int(prec), B_rows[b]);
+            }
+          B_rows_run = st.run;
+        }
+      arb_ptr part = _arb_vec_init(N);
+      arb_t t;
+      arb_init(t);
+      const slong limbs = (prec + FLINT_BITS - 1) / FLINT_BITS + 1;
+      for(size_t b = 0; b < L.blocks.size(); ++b)
+        {
+          const auto &Lb = L.blocks[b];
+          El::DistMatrix<El::BigFloat, El::STAR, El::STAR> Lss(Lb);
+          const slong m = Lss.Height();
+          arb_ptr La = _arb_vec_init(m * m);
+          for(slong i = 0; i < m; ++i)
+            for(slong k = 0; k <= i; ++k)
+              arf_from_mpf(arb_midref(La + i * m + k),
+                           Lss.GetLocalCRef(i, k).gmp_float.get_mpf_t(), limbs);
+          const Rows &BR = B_rows[b];
+          arb_ptr y = _arb_vec_init(m);
+          for(slong ii = 0; ii < BR.h; ++ii)
+            arb_approx_dot(y + BR.grow[ii], nullptr, 0, BR.rm + ii * BR.w, 1,
+                           v, 1, BR.w, prec);
+          exact_sum(y, m, prec + 32, y, Lb.Grid().Comm().comm);
+          // L u = y, then L^T w = u (w in y)
+          for(slong i = 0; i < m; ++i)
+            {
+              arb_approx_dot(t, y + i, 1, La + i * m, 1, y, 1, i, prec);
+              arb_div(y + i, t, La + i * m + i, prec);
+              mag_zero(arb_radref(y + i));
+            }
+          for(slong i = m - 1; i >= 0; --i)
+            {
+              arb_approx_dot(t, y + i, 1, La + (i + 1) * m + i, m, y + i + 1,
+                             1, m - 1 - i, prec);
+              arb_div(y + i, t, La + i * m + i, prec);
+              mag_zero(arb_radref(y + i));
+            }
+          for(slong ii = 0; ii < BR.h; ++ii)
+            _arb_vec_scalar_addmul(part, BR.rm + ii * BR.w, BR.w,
+                                   y + BR.grow[ii], prec);
+          _arb_vec_clear(y, m);
+          _arb_vec_clear(La, m * m);
+        }
+      arb_clear(t);
+      for(slong k = 0; k < N; ++k)
+        mag_zero(arb_radref(part + k));
+      exact_sum(part, N, prec + 32, out);
+      _arb_vec_clear(part, N);
+    }
+  }
+
   void set_cholesky_panel(int64_t panel)
   {
     if(enabled())
@@ -1664,6 +1738,9 @@ namespace lab235
           max_abs_arb(d, N, a);
           max_abs_arb(q_full, N, b);
           const double mv_rel = log10_arf(a) - log10_arf(b);
+          arf_t b0;
+          arf_init(b0);
+          arf_set(b0, b);
           // preconditioner
           arb_ptr z_low = _arb_vec_init(N);
           precondition_v2(r, z_low, N, prec);
@@ -1697,14 +1774,35 @@ namespace lab235
             pc_rel = log10_arf(a) - log10_arf(b);
             _arb_vec_clear(z_full, N);
           }
+          double bl_rel = 0, t_bl = 0, t_p = 0;
+          if(st.matvec_check >= 2 && st.sdp != nullptr && st.L_now != nullptr)
+            {
+              arb_ptr q_bl = _arb_vec_init(N);
+              El::mpi::Barrier(El::mpi::COMM_WORLD);
+              tc = Clock::now();
+              matvec_BL(*st.sdp, *st.L_now, r, q_bl, N, prec);
+              El::mpi::Barrier(El::mpi::COMM_WORLD);
+              t_bl = seconds_since(tc);
+              tc = Clock::now();
+              matvec_v2(r, q_low, N, prec);
+              El::mpi::Barrier(El::mpi::COMM_WORLD);
+              t_p = seconds_since(tc);
+              _arb_vec_sub(d, q_bl, q_full, N, wp);
+              max_abs_arb(d, N, a);
+              bl_rel = log10_arf(a) - log10_arf(b0);
+              _arb_vec_clear(q_bl, N);
+            }
           if(is_root())
             write_line("{\"kind\":\"check2\",\"it\":" + std::to_string(st.iteration)
+                       + ",\"BL_log10_rel\":" + fmt(bl_rel) + ",\"t_BL\":" + fmt(t_bl)
+                       + ",\"t_P\":" + fmt(t_p)
                        + ",\"bits\":" + std::to_string(prec)
                        + ",\"matvec_log10_rel\":" + fmt(mv_rel)
                        + ",\"prec_log10_rel\":" + fmt(pc_rel)
                        + ",\"t_full\":" + fmt(t_full) + ",\"t_low\":" + fmt(t_low) + "}");
           arf_clear(a);
           arf_clear(b);
+          arf_clear(b0);
           _arb_vec_clear(z_low, N);
           _arb_vec_clear(q_full, N);
           _arb_vec_clear(q_low, N);
