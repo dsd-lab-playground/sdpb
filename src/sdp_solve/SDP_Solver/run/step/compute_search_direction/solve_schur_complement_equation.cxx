@@ -3,6 +3,7 @@
 #include "sdp_solve/lower_triangular_transpose_solve.hxx"
 #include "sdpb_util/copy_matrix.hxx"
 #include "sdpb_util/Timers/Timers.hxx"
+#include "../lab235/lab235.hxx"
 
 #include <cstdlib>
 #include <optional>
@@ -34,6 +35,43 @@ void solve_schur_complement_equation(
   begin("L_solve");
   lower_triangular_solve(schur_complement_cholesky, dx);
   begin("dy_sum");
+
+  // lab (agent) #243: inexact mode, Q not formed this iteration. The rhs's
+  // partial sums go to the PCG, which sums them exactly over all ranks and
+  // returns dy, the same on every rank (lab235.hxx, v2).
+  if(lab235::skip_Q())
+    {
+      El::Matrix<El::BigFloat> dy_sum;
+      Zeros(dy_sum, Q.Height(), 1);
+      for(size_t block = 0; block < schur_off_diagonal.blocks.size(); ++block)
+        {
+          Gemv(El::OrientationNS::TRANSPOSE, El::BigFloat(-1),
+               schur_off_diagonal.blocks[block], dx.blocks[block],
+               El::BigFloat(1), dy.blocks[block]);
+          for(int64_t row = 0; row < dy.blocks[block].LocalHeight(); ++row)
+            {
+              const int64_t global_row(dy.blocks[block].GlobalRow(row));
+              for(int64_t column = 0;
+                  column < dy.blocks[block].LocalWidth(); ++column)
+                dy_sum(global_row, dy.blocks[block].GlobalCol(column))
+                  += dy.blocks[block].GetLocal(row, column);
+            }
+        }
+      phase.reset(); // lab_pcg directly under solve_schur
+      lab235::inexact_solve_v2(schur_off_diagonal, dy_sum);
+      begin("dx_update");
+      for(size_t block = 0; block < schur_off_diagonal.blocks.size(); ++block)
+        {
+          copy_matrix(dy_sum, dy.blocks[block]);
+          Gemv(El::OrientationNS::NORMAL, El::BigFloat(1),
+               schur_off_diagonal.blocks[block], dy.blocks[block],
+               El::BigFloat(1), dx.blocks[block]);
+        }
+      begin("LT_solve");
+      lower_triangular_transpose_solve(schur_complement_cholesky, dx);
+      phase.reset();
+      return;
+    }
 
   // lab #143: if Q lives on a sub-grid of the ranks (--qSolveRanks,
   // --qCholeskyRanks), or SDPB_DY_ALLREDUCE=1, sum dy over all ranks by one
@@ -97,6 +135,15 @@ void solve_schur_complement_equation(
 
   El::DistMatrix<El::BigFloat> dy_dist;
   Zeros(dy_dist, Q.Height(), 1);
+  // lab (agent) #235: p = b - B^T x is the sum of dy's blocks on entry
+  // (#243: not in the inexact mode, whose refactor iterations solve exactly)
+  const bool lab_measure = lab235::enabled() && !lab235::state().inexact;
+  El::DistMatrix<El::BigFloat> lab_p, lab_rhs;
+  if(lab_measure)
+    {
+      Zeros(lab_p, Q.Height(), 1);
+      lab235::sum_blocks(dy, lab_p);
+    }
   {
     El::Matrix<El::BigFloat> dy_sum;
     Zeros(dy_sum, Q.Height(), 1);
@@ -135,11 +182,16 @@ void solve_schur_complement_equation(
   }
   begin("dy_process_queues");
   dy_dist.ProcessQueues();
+  if(lab_measure)
+    lab_rhs = dy_dist;
 
   // dy_dist = Q^{-1}.dy_dist
   begin("Q_solve");
   El::cholesky::SolveAfter(El::UpperOrLowerNS::UPPER,
                            El::OrientationNS::NORMAL, Q, dy_dist);
+  if(lab_measure)
+    lab235::solve_hook(schur_off_diagonal, dy, dx, Q, lab_rhs, lab_p,
+                       dy_dist);
   begin("dy_star_star");
   El::DistMatrix<El::BigFloat, El::STAR, El::STAR> dy_local(dy_dist);
   begin("dx_update");

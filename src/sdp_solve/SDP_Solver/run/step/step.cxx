@@ -3,6 +3,7 @@
 #include "sdp_solve/SDP_Solver.hxx"
 #include "sdp_solve/SDP_Solver/run/bigint_syrk/BigInt_Shared_Memory_Syrk_Context.hxx"
 #include "sdp_solve/memory_estimates.hxx"
+#include "lab235/lab235.hxx"
 
 void scale_multiply_add(const El::BigFloat &alpha,
                         const Block_Diagonal_Matrix &A,
@@ -75,6 +76,9 @@ void SDP_Solver::step(
   El::Zero(block_timings_ms);
 
   El::BigFloat beta_predictor;
+  // lab (agent) #235: off unless LAB235_DIR is set
+  lab235::begin_step(primal_error(), parameters.primal_error_threshold,
+                     primal_error_P);
 
   // Search direction: These quantities have the same structure
   // as (x, X, y, Y). They are computed twice each iteration:
@@ -120,6 +124,12 @@ void SDP_Solver::step(
         print_allocation_message_per_node(env, "Q", get_allocated_bytes(Q));
       }
 
+    // lab (agent) #239: context for an on-demand refactor in the inexact mode
+    lab235::set_step_context(env, bigint_syrk_context, timers,
+                             block_timings_ms, verbosity, Q,
+                             schur_off_diagonal);
+    lab235::set_cholesky_panel(parameters.multimodular_cholesky_Q);
+
     // Compute SchurComplement and prepare to solve the Schur
     // complement equation for dx, dy
     initialize_schur_complement_solver(env, block_info, sdp, A_X_inv, A_Y,
@@ -129,6 +139,7 @@ void SDP_Solver::step(
                                        parameters.multimodular_trsm,
                                        parameters.multimodular_cholesky_Q,
                                        verbosity, q_grids);
+    lab235::after_factor(sdp, block_info, schur_complement_cholesky, Q);
 
     // Calculate matrix product -XY
     // It will be reused for mu, R-err, compute_search_direction().
@@ -179,6 +190,7 @@ void SDP_Solver::step(
     {
       Scoped_Timer corrector_timer(timers,
                                    "computeSearchDirection(betaCorrector)");
+      lab235::state().phase = 1;
       beta_corrector = corrector_centering_parameter(
         parameters, X, dX, Y, dY, mu, is_primal_and_dual_feasible,
         total_psd_rows);
@@ -191,9 +203,13 @@ void SDP_Solver::step(
     }
 
     // Calculate condition numbers for Cholesky matrices
-    update_cond_numbers(Q, block_info, schur_complement_cholesky, X_cholesky,
+    // lab (agent) #239: without Q this iteration, the last refactor's factor
+    update_cond_numbers(lab235::cond_factor(Q), block_info,
+                        schur_complement_cholesky, X_cholesky,
                         Y_cholesky, timers, Q_cond_number,
                         max_block_cond_number, max_block_cond_number_name);
+    lab235::end_step(schur_complement_cholesky, Q);
+    lab235::state().L_now = nullptr;
   }
   // Compute step-lengths that preserve positive definiteness of X, Y
   primal_step_length

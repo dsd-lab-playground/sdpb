@@ -5,6 +5,7 @@
 #include "sdp_solve/SDP_Solver/run/multimodular/Multimodular_Block_Factor.hxx"
 #include "sdp_solve/memory_estimates.hxx"
 #include "sdpb_util/Timers/Timers.hxx"
+#include "../lab235/lab235.hxx"
 
 // schur_off_diagonal = L^{-1} B
 void initialize_schur_off_diagonal(
@@ -166,6 +167,9 @@ void compute_Q(const Environment &env, const SDP &sdp,
                                 schur_off_diagonal, schur_complement_cholesky,
                                 timers, block_timings_ms, multimodular_trsm,
                                 verbosity);
+  // lab (agent) #239: inexact mode, not a refactor iteration: Q is not formed
+  if(lab235::skip_Q())
+    return;
   syrk_Q(env, schur_off_diagonal, bigint_syrk_context, Q, timers,
          block_timings_ms, verbosity);
 }

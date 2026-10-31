@@ -5,6 +5,7 @@
 #include "sdp_solve/memory_estimates.hxx"
 #include "sdp_solve/SDP_Solver/run/multimodular/multimodular_blas.hxx"
 #include "sdp_solve/SDP_Solver/run/step/Q_Grids.hxx"
+#include "../lab235/lab235.hxx"
 
 #include <cstdlib>
 
@@ -139,6 +140,12 @@ void initialize_schur_complement_solver(
             schur_complement_cholesky, bigint_syrk_context, Q, timers,
             block_timings_ms, multimodular_trsm, verbosity);
 
+  // lab (agent) #239: inexact mode, not a refactor iteration: no Q (syrk
+  // skipped in compute_Q), no Cholesky_Q; Q stays (unformed) on the default
+  // grid
+  if(lab235::skip_Q())
+    return;
+
   // Move Q to the grid where it is factored (lab #143).
   // SDPB_Q_COPY_UPPER=1: copy the upper triangle only (all that
   // Cholesky(UPPER) and the solves read), else El's copy of all N^2 entries.
@@ -185,6 +192,11 @@ void initialize_schur_complement_solver(
       RUNTIME_ERROR("Error when computing Cholesky(Q): ", e.what());
     }
   Cholesky_timer.stop();
+
+  // lab (agent) #243: inexact mode, refactor iteration: U^-1 and the
+  // preconditioner's 256-bit rows, on the grid where Q was factored (all
+  // ranks unless --qCholeskyRanks), before Q moves to the solve grid
+  lab235::after_cholesky(Q);
 
   if(q_grids != nullptr && q_grids->solve_grid() != nullptr)
     move_Q_to(*q_grids->solve_grid(), "Q_to_solve_grid");
