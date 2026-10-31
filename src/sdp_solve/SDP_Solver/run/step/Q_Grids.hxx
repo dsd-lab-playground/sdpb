@@ -38,3 +38,11 @@ public:
 private:
   std::unique_ptr<El::Grid> cholesky_, solve_;
 };
+
+// B := the upper triangle of A, with B's strictly lower triangle zero
+// (lab #143). A and B are [MC,MR] on grids whose viewing communicator has
+// the ranks of COMM_WORLD (B keeps its grid); all ranks call it. One
+// AllToAll moves the N(N+1)/2 entries that Cholesky(UPPER) and the
+// triangular solves read, instead of El::Copy's N^2.
+void copy_upper_between_grids(const El::DistMatrix<El::BigFloat> &A,
+                              El::DistMatrix<El::BigFloat> &B);

@@ -139,11 +139,20 @@ void initialize_schur_complement_solver(
             schur_complement_cholesky, bigint_syrk_context, Q, timers,
             block_timings_ms, multimodular_trsm, verbosity);
 
-  // Move Q to the grid where it is factored (lab #143)
+  // Move Q to the grid where it is factored (lab #143).
+  // SDPB_Q_COPY_UPPER=1: copy the upper triangle only (all that
+  // Cholesky(UPPER) and the solves read), else El's copy of all N^2 entries.
+  static const bool copy_upper = [] {
+    const char *env = std::getenv("SDPB_Q_COPY_UPPER");
+    return env != nullptr && env[0] == '1';
+  }();
   auto move_Q_to = [&Q, &timers](const El::Grid &grid, const char *name) {
     Scoped_Timer timer(timers, name);
     El::DistMatrix<El::BigFloat> Q_new(grid);
-    Q_new = Q;
+    if(copy_upper)
+      copy_upper_between_grids(Q, Q_new);
+    else
+      Q_new = Q;
     Q.Empty();
     Q = std::move(Q_new);
   };
