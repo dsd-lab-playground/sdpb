@@ -1,5 +1,9 @@
 // lab (agent) #235: see lab235.hxx.
 
+// #239: mpfr.h before any FLINT header (arf_get_mpfr is declared only then)
+#include <gmp.h>
+#include <mpfr.h>
+
 #include "lab235.hxx"
 
 #include "sdpb_util/copy_matrix.hxx"
@@ -7,6 +11,10 @@
 #include "sdp_solve/lower_triangular_transpose_solve.hxx"
 
 #include "sdp_solve/SDP_Solver/run/bigint_syrk/BigInt_Shared_Memory_Syrk_Context.hxx"
+#include "sdpb_util/flint.hxx"
+
+#include <flint/arb.h>
+#include <flint/arf.h>
 
 #include <algorithm>
 #include <chrono>
@@ -141,11 +149,181 @@ namespace lab235
       return El::Dotu(a, b);
     }
 
+    // #239 (step 3): the matvec in low precision. P's local entries are
+    // rounded once per iteration to arb midpoints of LAB235_MATVEC_BITS bits
+    // (row-major); both products are arb_approx_dot at that precision. For a
+    // block spread over several ranks, P_j v's partial sums (over the rank's
+    // columns) are summed over the block's row communicator in BigFloat.
+    void arf_from_mpf(arf_t y, mpf_srcptr x, slong limbs)
+    {
+      const slong size = x->_mp_size;
+      if(size == 0)
+        {
+          arf_zero(y);
+          return;
+        }
+      // an mpf need not be normalized: skip zero top limbs (arf_set_mpn
+      // scans for a nonzero limb without a bound)
+      slong n = size < 0 ? -size : size;
+      slong e = x->_mp_exp;
+      while(n > 0 && x->_mp_d[n - 1] == 0)
+        {
+          --n;
+          --e;
+        }
+      if(n == 0)
+        {
+          arf_zero(y);
+          return;
+        }
+      const slong k = std::min(n, limbs);
+      arf_set_mpn(y, x->_mp_d + (n - k), k, size < 0);
+      arf_mul_2exp_si(y, y, slong(FLINT_BITS) * (e - k));
+    }
+    void bf_from_arf(El::BigFloat &y, const arf_t x, mpfr_t tmp)
+    {
+      arf_get_mpfr(tmp, x, MPFR_RNDN);
+      mpfr_get_f(y.gmp_float.get_mpf_t(), tmp, MPFR_RNDN);
+    }
+    struct Low_Block
+    {
+      slong h = 0, w = 0;
+      arb_ptr rm = nullptr; // h x w, row-major
+      std::vector<int64_t> gcol;
+      El::mpi::Comm row_comm;
+      int row_comm_size = 1;
+    };
+    struct Low_P
+    {
+      int bits = 0;
+      int iteration = -1;
+      int run = -1;
+      std::vector<Low_Block> blocks;
+      double t_build = 0;
+      void clear()
+      {
+        for(auto &b : blocks)
+          if(b.rm != nullptr)
+            _arb_vec_clear(b.rm, b.h * b.w);
+        blocks.clear();
+      }
+    };
+    Low_P &low_p()
+    {
+      static Low_P *lp = new Low_P;
+      return *lp;
+    }
+    bool low_active = false; // apply_Q dispatches to apply_Q_low
+
+    void build_low(const Block_Matrix &P, int bits, int iteration, int run)
+    {
+      auto &lp = low_p();
+      if(lp.bits == bits && lp.iteration == iteration && lp.run == run)
+        return;
+      auto t0 = std::chrono::steady_clock::now();
+      lp.clear();
+      lp.bits = bits;
+      lp.iteration = iteration;
+      lp.run = run;
+      const slong limbs = (bits + FLINT_BITS - 1) / FLINT_BITS + 1;
+      lp.blocks.resize(P.blocks.size());
+      for(size_t b = 0; b < P.blocks.size(); ++b)
+        {
+          const auto &Pb = P.blocks[b];
+          auto &lb = lp.blocks[b];
+          lb.h = Pb.LocalHeight();
+          lb.w = Pb.LocalWidth();
+          lb.rm = _arb_vec_init(lb.h * lb.w);
+          for(slong i = 0; i < lb.h; ++i)
+            for(slong k = 0; k < lb.w; ++k)
+              arf_from_mpf(arb_midref(lb.rm + i * lb.w + k),
+                           Pb.GetLocalCRef(i, k).gmp_float.get_mpf_t(), limbs);
+          lb.gcol.resize(lb.w);
+          for(slong k = 0; k < lb.w; ++k)
+            lb.gcol[k] = Pb.GlobalCol(k);
+          lb.row_comm = Pb.RowComm();
+          lb.row_comm_size = El::mpi::Size(lb.row_comm);
+        }
+      lp.t_build
+        = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0)
+            .count();
+    }
+
+    void apply_Q_low(const El::DistMatrix<El::BigFloat> &v,
+                     El::DistMatrix<El::BigFloat> &out)
+    {
+      auto &lp = low_p();
+      const slong prec = lp.bits;
+      const slong limbs = (prec + FLINT_BITS - 1) / FLINT_BITS + 1;
+      const int64_t N = v.Height();
+      El::DistMatrix<El::BigFloat, El::STAR, El::STAR> v_local(v);
+      arb_ptr va = _arb_vec_init(N);
+      for(int64_t k = 0; k < N; ++k)
+        arf_from_mpf(arb_midref(va + k),
+                     v_local.GetLocalCRef(k, 0).gmp_float.get_mpf_t(), limbs);
+      El::Matrix<El::BigFloat> sum;
+      El::Zeros(sum, N, 1);
+      mpfr_t tmp;
+      mpfr_init2(tmp, prec + 64);
+      arb_t t;
+      arb_init(t);
+      for(auto &lb : lp.blocks)
+        {
+          if(lb.h == 0 || lb.w == 0)
+            continue;
+          arb_ptr vl = _arb_vec_init(lb.w);
+          for(slong k = 0; k < lb.w; ++k)
+            arb_set(vl + k, va + lb.gcol[k]);
+          arb_ptr wl = _arb_vec_init(lb.h);
+          for(slong i = 0; i < lb.h; ++i)
+            arb_approx_dot(wl + i, nullptr, 0, lb.rm + i * lb.w, 1, vl, 1,
+                           lb.w, prec);
+          if(lb.row_comm_size > 1)
+            {
+              std::vector<El::BigFloat> buf(lb.h);
+              for(slong i = 0; i < lb.h; ++i)
+                bf_from_arf(buf[i], arb_midref(wl + i), tmp);
+              El::mpi::AllReduce(buf.data(), int(lb.h), El::mpi::SUM,
+                                 lb.row_comm);
+              for(slong i = 0; i < lb.h; ++i)
+                {
+                  arf_from_mpf(arb_midref(wl + i),
+                               buf[i].gmp_float.get_mpf_t(), limbs);
+                  mag_zero(arb_radref(wl + i));
+                }
+            }
+          for(slong k = 0; k < lb.w; ++k)
+            {
+              arb_approx_dot(t, nullptr, 0, lb.rm + k, lb.w, wl, 1, lb.h,
+                             prec);
+              El::BigFloat y;
+              bf_from_arf(y, arb_midref(t), tmp);
+              sum(lb.gcol[k], 0) += y;
+            }
+          _arb_vec_clear(wl, lb.h);
+          _arb_vec_clear(vl, lb.w);
+        }
+      arb_clear(t);
+      mpfr_clear(tmp);
+      _arb_vec_clear(va, N);
+      El::Zeros(out, N, 1);
+      El::BigFloat zero(0);
+      for(int64_t row = 0; row < N; ++row)
+        if(sum(row, 0) != zero)
+          out.QueueUpdate(row, 0, sum(row, 0));
+      out.ProcessQueues();
+    }
+
     // Q_new v = sum_j P_j^T (P_j v), P_j = L_j^{-1} B_j (SDPB's schur_off_diagonal)
     void apply_Q(const Block_Matrix &P, Block_Vector &work_N,
                  Block_Vector &work_P, const El::DistMatrix<El::BigFloat> &v,
                  El::DistMatrix<El::BigFloat> &out)
     {
+      if(low_active)
+        {
+          apply_Q_low(v, out);
+          return;
+        }
       El::DistMatrix<El::BigFloat, El::STAR, El::STAR> v_local(v);
       for(size_t b = 0; b < P.blocks.size(); ++b)
         {
@@ -585,6 +763,8 @@ namespace lab235
     st.refactor_steps = env_int("LAB235_REFACTOR_STEPS", 12);
     st.rel_min = env_double("LAB235_REL_MIN", 1e-8);
     st.rel_gamma = env_double("LAB235_REL_GAMMA", 0.1);
+    st.matvec_bits = env_int("LAB235_MATVEC_BITS", 0);
+    st.matvec_check = env_int("LAB235_MATVEC_CHECK", 0);
     if(st.inexact)
       {
         // only the last refactor's factor and inverse are kept; no measurements
@@ -621,6 +801,8 @@ namespace lab235
            << ",\"refactor_steps\":" << st.refactor_steps
            << ",\"rel_min\":" << fmt(st.rel_min)
            << ",\"rel_gamma\":" << fmt(st.rel_gamma)
+           << ",\"matvec_bits\":" << st.matvec_bits
+           << ",\"matvec_check\":" << st.matvec_check
            << ",\"prec\":" << El::gmp::Precision()
            << ",\"ranks\":" << El::mpi::Size(El::mpi::COMM_WORLD) << "}";
         write_line(os.str());
@@ -752,6 +934,45 @@ namespace lab235
     {
       Scoped_Timer pcg_timer(*st.timers, "lab_pcg");
       Block_Vector work_P(work_P_template);
+      if(st.matvec_bits > 0)
+        {
+          // #239 step 3: low-precision matvec (P rounded once per iteration)
+          {
+            Scoped_Timer build_timer(*st.timers, "low_build");
+            build_low(P, st.matvec_bits, st.iteration, st.run);
+          }
+          if(st.matvec_check && st.phase == 0)
+            {
+              // agreement and time of the two matvecs on v = rhs
+              El::DistMatrix<El::BigFloat> q1(rhs.Grid()), q2(rhs.Grid());
+              // sized: apply_Q's sum_blocks takes the height from its output
+              El::Zeros(q1, rhs.Height(), 1);
+              El::Zeros(q2, rhs.Height(), 1);
+              El::mpi::Barrier(El::mpi::COMM_WORLD);
+              auto t1 = Clock::now();
+              apply_Q(P, work_N, work_P, rhs, q1);
+              El::mpi::Barrier(El::mpi::COMM_WORLD);
+              const double t_full = seconds_since(t1);
+              low_active = true;
+              t1 = Clock::now();
+              apply_Q(P, work_N, work_P, rhs, q2);
+              El::mpi::Barrier(El::mpi::COMM_WORLD);
+              const double t_low = seconds_since(t1);
+              low_active = false;
+              El::Axpy(El::BigFloat(-1), q1, q2);
+              const double rel
+                = log10_abs(max_abs(q2)) - log10_abs(max_abs(q1));
+              if(is_root())
+                write_line("{\"kind\":\"matvec_low\",\"it\":"
+                           + std::to_string(st.iteration) + ",\"bits\":"
+                           + std::to_string(st.matvec_bits) + ",\"t_full\":"
+                           + fmt(t_full) + ",\"t_low\":" + fmt(t_low)
+                           + ",\"t_build\":" + fmt(low_p().t_build)
+                           + ",\"log10_rel_diff\":" + fmt(rel) + "}");
+            }
+          // LAB235_MATVEC_CHECK=2: measure only, the PCG keeps the working-precision matvec
+          low_active = (st.matvec_check != 2);
+        }
       // |r|_inf <= max(rel_k |rhs|_inf, eta x max(primal error, thr floor))
       El::BigFloat stop_abs
         = El::BigFloat(st.use_eta)
@@ -768,6 +989,7 @@ namespace lab235
                 stop_abs, x, "inexact", st.iteration - st.last_refactor,
                 p_norm, 0, &st.Qinv_hist.front());
       st.pcg_max_iters = saved;
+      low_active = false;
       if(res.stopped_on_abs || res.converged)
         {
           dy_dist = x;

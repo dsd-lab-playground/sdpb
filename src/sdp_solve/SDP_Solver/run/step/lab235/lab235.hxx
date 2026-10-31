@@ -130,6 +130,11 @@ namespace lab235
     Verbosity verbosity = Verbosity::regular;
     El::DistMatrix<El::BigFloat> *Q = nullptr;
     Block_Matrix *P = nullptr;
+    // #239 step 3: PCG matvec in LAB235_MATVEC_BITS-bit arb arithmetic (0: working precision);
+    // LAB235_MATVEC_CHECK=1: per iteration, both matvecs on the predictor rhs (agreement, time);
+    // =2: the same, but the PCG keeps the working-precision matvec (measurement only)
+    int matvec_bits = 0;
+    int matvec_check = 0;
   };
 
   State &state();
