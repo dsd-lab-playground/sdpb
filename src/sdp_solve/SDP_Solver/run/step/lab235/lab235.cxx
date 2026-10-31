@@ -565,6 +565,7 @@ namespace lab235
     st.use_abs_log10 = env_double("LAB235_USE_ABS_LOG10", -1e9);
     st.skip_runs = env_int("LAB235_SKIP_RUNS", 0);
     st.use_thr_factor = env_double("LAB235_USE_THR", 1.0);
+    st.use_rel = env_double("LAB235_USE_REL", 0.0);
     int keep = 1;
     for(auto v : {st.stale_Q, st.stale_S, st.stale_pcg})
       for(int s : v)
@@ -846,6 +847,9 @@ namespace lab235
               = El::BigFloat(st.use_eta)
                 * std::max(std::max(st.primal_error, p_norm),
                            std::max(floor_abs, floor_thr));
+            // a relative forcing term (standard inexact Newton): |r| <= use_rel |rhs|
+            if(st.use_rel > 0)
+              stop_abs = std::max(stop_abs, El::BigFloat(st.use_rel) * max_abs(rhs));
             El::DistMatrix<El::BigFloat> x(rhs.Grid());
             const El::DistMatrix<El::BigFloat> *x0 = nullptr;
             if(st.warm_corrector && st.phase == 1 && st.warm[0].Height() > 0)

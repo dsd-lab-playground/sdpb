@@ -66,6 +66,7 @@ namespace lab235
     El::BigFloat primal_error;       // SDPB's max(|P|, |p|) at the start of the step
     El::BigFloat primal_threshold;   // --primalErrorThreshold
     double use_thr_factor = 0;       // use mode floor: LAB235_USE_THR x primal_threshold
+    double use_rel = 0;              // LAB235_USE_REL: also stop at |r|_inf <= use_rel x |rhs|_inf
     int phase = 0;                   // 0 predictor, 1 corrector
     std::deque<El::DistMatrix<El::BigFloat>> Q_hist; // newest first
     std::deque<Block_Diagonal_Matrix> S_hist;        // newest first
