@@ -3,6 +3,7 @@
 #include "sdpb_util/Timers/Timers.hxx"
 #include "sdp_solve/SDP_Solver/run/bigint_syrk/BigInt_Shared_Memory_Syrk_Context.hxx"
 #include "sdp_solve/memory_estimates.hxx"
+#include "../lab235/lab235.hxx"
 
 // Compute the quantities needed to solve the Schur complement
 // equation
@@ -94,6 +95,10 @@ void initialize_schur_complement_solver(
             schur_complement_cholesky, bigint_syrk_context, Q, timers,
             block_timings_ms, multimodular_trsm, verbosity);
 
+  // lab (agent) #239: inexact mode, not a refactor iteration: no Q (syrk
+  // skipped in compute_Q), no Cholesky_Q
+  if(lab235::skip_Q())
+    return;
   Scoped_Timer Cholesky_timer(timers, "Cholesky_Q");
   try
     {

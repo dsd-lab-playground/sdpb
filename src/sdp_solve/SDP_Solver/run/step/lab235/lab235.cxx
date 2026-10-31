@@ -6,12 +6,20 @@
 #include "sdp_solve/SDP_Solver/run/step/compute_search_direction/lower_triangular_solve.hxx"
 #include "sdp_solve/lower_triangular_transpose_solve.hxx"
 
+#include "sdp_solve/SDP_Solver/run/bigint_syrk/BigInt_Shared_Memory_Syrk_Context.hxx"
+
 #include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstdlib>
 #include <iomanip>
 #include <sstream>
+
+// compute_Q.cxx: Q = P^T P (#239's on-demand refactor)
+void syrk_Q(const Environment &env, Block_Matrix &schur_off_diagonal,
+            BigInt_Shared_Memory_Syrk_Context &bigint_syrk_context,
+            El::DistMatrix<El::BigFloat> &Q, Timers &timers,
+            El::Matrix<int32_t> &block_timings_ms, const Verbosity verbosity);
 
 namespace lab235
 {
@@ -355,7 +363,7 @@ namespace lab235
     PCG_Result pcg(const Block_Matrix &P, Block_Vector &work_N,
                    Block_Vector &work_P, const El::DistMatrix<El::BigFloat> &U_old,
                    const El::DistMatrix<El::BigFloat> &rhs,
-                   const El::DistMatrix<El::BigFloat> &x_exact,
+                   const El::DistMatrix<El::BigFloat> *x_exact,
                    const El::DistMatrix<El::BigFloat> *x0,
                    const El::BigFloat &stop_abs, El::DistMatrix<El::BigFloat> &x,
                    const std::string &label, int s, const El::BigFloat &p_norm,
@@ -387,7 +395,10 @@ namespace lab235
       double t_mv = 0, t_pc = 0;
       int n_mv = 0, n_pc = 0;
       const El::BigFloat rhs_norm = max_abs(rhs);
-      const El::BigFloat xs_norm = max_abs(x_exact);
+      // x_exact: SDPB's exact solution, for the error log (nullptr in #239's
+      // inexact mode, where there is none)
+      const El::BigFloat xs_norm
+        = x_exact != nullptr ? max_abs(*x_exact) : El::BigFloat(0);
       const int prec = El::gmp::Precision();
       const El::BigFloat floor_rel
         = El::BigFloat(1) >> std::max(1, prec - st.pcg_floor_bits);
@@ -415,12 +426,15 @@ namespace lab235
       std::vector<double> lres, lerr, labs, alphas, betas;
       auto record = [&]() {
         El::BigFloat rn = max_abs(r);
-        d = x;
-        El::Axpy(El::BigFloat(-1), x_exact, d);
-        El::BigFloat en = max_abs(d);
         lres.push_back(log10_abs(rn) - log10_abs(rhs_norm));
         labs.push_back(log10_abs(rn));
-        lerr.push_back(log10_abs(en) - log10_abs(xs_norm));
+        if(x_exact != nullptr)
+          {
+            d = x;
+            El::Axpy(El::BigFloat(-1), *x_exact, d);
+            El::BigFloat en = max_abs(d);
+            lerr.push_back(log10_abs(en) - log10_abs(xs_norm));
+          }
         return rn;
       };
       El::BigFloat rn = record();
@@ -566,12 +580,30 @@ namespace lab235
     st.skip_runs = env_int("LAB235_SKIP_RUNS", 0);
     st.use_thr_factor = env_double("LAB235_USE_THR", 1.0);
     st.use_rel = env_double("LAB235_USE_REL", 0.0);
+    // #239 inexact solver mode
+    st.inexact = env_int("LAB235_INEXACT", 0) != 0;
+    st.refactor_steps = env_int("LAB235_REFACTOR_STEPS", 12);
+    st.rel_min = env_double("LAB235_REL_MIN", 1e-8);
+    st.rel_gamma = env_double("LAB235_REL_GAMMA", 0.1);
+    if(st.inexact)
+      {
+        // only the last refactor's factor and inverse are kept; no measurements
+        st.prec_inv = true;
+        st.stale_Q.clear();
+        st.stale_S.clear();
+        st.stale_pcg.clear();
+        st.pcg_doubles.clear();
+        st.self_control = false;
+        st.check_BL = false;
+        if(st.use_period < 1)
+          st.use_period = 4;
+      }
     int keep = 1;
     for(auto v : {st.stale_Q, st.stale_S, st.stale_pcg})
       for(int s : v)
         keep = std::max(keep, s);
     keep = std::max(keep, st.use_period - 1);
-    st.keep = env_int("LAB235_KEEP", keep);
+    st.keep = st.inexact ? 1 : env_int("LAB235_KEEP", keep);
     if(is_root())
       {
         st.log.open(st.dir + "/lab235.jsonl", std::ios::app);
@@ -583,6 +615,12 @@ namespace lab235
            << ",\"use_period\":" << st.use_period
            << ",\"use_eta\":" << fmt(st.use_eta)
            << ",\"use_abs_log10\":" << fmt(st.use_abs_log10)
+           << ",\"use_rel\":" << fmt(st.use_rel)
+           << ",\"inexact\":" << st.inexact
+           << ",\"use_max\":" << st.use_max_iters
+           << ",\"refactor_steps\":" << st.refactor_steps
+           << ",\"rel_min\":" << fmt(st.rel_min)
+           << ",\"rel_gamma\":" << fmt(st.rel_gamma)
            << ",\"prec\":" << El::gmp::Precision()
            << ",\"ranks\":" << El::mpi::Size(El::mpi::COMM_WORLD) << "}";
         write_line(os.str());
@@ -605,6 +643,9 @@ namespace lab235
     st.active = st.run > st.skip_runs;
     st.iteration = 0;
     st.self_done = false;
+    st.perr_ref_set = false;
+    st.last_refactor = 0;
+    st.need_refactor = false;
     // the previous run's matrices may live on a grid that no longer exists: leak them
     (new std::deque<El::DistMatrix<El::BigFloat>>)->swap(st.Q_hist);
     (new std::deque<Block_Diagonal_Matrix>)->swap(st.S_hist);
@@ -617,7 +658,8 @@ namespace lab235
   }
 
   void begin_step(const El::BigFloat &primal_error,
-                  const El::BigFloat &primal_error_threshold)
+                  const El::BigFloat &primal_error_threshold,
+                  const El::BigFloat &primal_error_P)
   {
     if(!enabled())
       return;
@@ -627,6 +669,143 @@ namespace lab235
     st.primal_threshold = primal_error_threshold;
     st.phase = 0;
     st.warm.clear();
+    if(!st.inexact)
+      return;
+    // forcing: rel_k = clamp(use_rel x (Perr_k / Perr_1)^gamma, rel_min, use_rel)
+    st.perr_log10 = log10_abs(primal_error_P);
+    if(!st.perr_ref_set)
+      {
+        st.perr_ref_log10 = st.perr_log10;
+        st.perr_ref_set = true;
+      }
+    double lrel = std::log10(st.use_rel)
+                  + st.rel_gamma * (st.perr_log10 - st.perr_ref_log10);
+    lrel = std::min(lrel, std::log10(st.use_rel));
+    lrel = std::max(lrel, std::log10(st.rel_min));
+    st.rel_now = std::pow(10.0, lrel);
+    // refactor or not
+    std::string reason;
+    if(st.Q_hist.empty() || st.Qinv_hist.empty())
+      reason = "first";
+    else if(st.need_refactor)
+      reason = "slow";
+    else if(st.iteration - st.last_refactor >= st.use_period)
+      reason = "period";
+    st.refactor_reason = reason;
+    st.skip_Q = reason.empty();
+    st.Q_formed = !st.skip_Q;
+    st.need_refactor = false;
+    st.fallback = false;
+    st.steps_now.clear();
+    st.t_pcg_now = 0;
+    st.t_inv_now = 0;
+    if(st.Q_formed)
+      st.last_refactor = st.iteration;
+  }
+
+  void set_step_context(const Environment &env,
+                        BigInt_Shared_Memory_Syrk_Context &syrk_ctx,
+                        Timers &timers, El::Matrix<int32_t> &block_timings_ms,
+                        Verbosity verbosity, El::DistMatrix<El::BigFloat> &Q,
+                        Block_Matrix &P)
+  {
+    if(!enabled())
+      return;
+    auto &st = state();
+    st.env = &env;
+    st.syrk_ctx = &syrk_ctx;
+    st.timers = &timers;
+    st.block_timings_ms = &block_timings_ms;
+    st.verbosity = verbosity;
+    st.Q = &Q;
+    st.P = &P;
+  }
+
+  bool skip_Q()
+  {
+    if(!enabled())
+      return false;
+    const auto &st = state();
+    return st.inexact && st.skip_Q;
+  }
+
+  const El::DistMatrix<El::BigFloat> &
+  cond_factor(const El::DistMatrix<El::BigFloat> &Q)
+  {
+    if(skip_Q() && !state().Q_hist.empty())
+      return state().Q_hist.front();
+    return Q;
+  }
+
+  void inexact_solve(const Block_Matrix &P, Block_Vector &work_N,
+                     const Block_Vector &work_P_template,
+                     const El::DistMatrix<El::BigFloat> &p,
+                     El::DistMatrix<El::BigFloat> &dy_dist)
+  {
+    auto &st = state();
+    auto t0 = Clock::now();
+    const El::DistMatrix<El::BigFloat> rhs(dy_dist);
+    const El::BigFloat p_norm = max_abs(p);
+    if(st.warm.empty())
+      st.warm.resize(1);
+    PCG_Result res;
+    {
+      Scoped_Timer pcg_timer(*st.timers, "lab_pcg");
+      Block_Vector work_P(work_P_template);
+      // |r|_inf <= max(rel_k |rhs|_inf, eta x max(primal error, thr floor))
+      El::BigFloat stop_abs
+        = El::BigFloat(st.use_eta)
+          * std::max(st.primal_error,
+                     El::BigFloat(st.use_thr_factor) * st.primal_threshold);
+      stop_abs = std::max(stop_abs, El::BigFloat(st.rel_now) * max_abs(rhs));
+      const El::DistMatrix<El::BigFloat> *x0 = nullptr;
+      if(st.warm_corrector && st.phase == 1 && st.warm[0].Height() > 0)
+        x0 = &st.warm[0];
+      El::DistMatrix<El::BigFloat> x(rhs.Grid());
+      const int saved = st.pcg_max_iters;
+      st.pcg_max_iters = st.use_max_iters;
+      res = pcg(P, work_N, work_P, st.Q_hist.front(), rhs, nullptr, x0,
+                stop_abs, x, "inexact", st.iteration - st.last_refactor,
+                p_norm, 0, &st.Qinv_hist.front());
+      st.pcg_max_iters = saved;
+      if(res.stopped_on_abs || res.converged)
+        {
+          dy_dist = x;
+          if(st.phase == 0)
+            st.warm[0] = x;
+        }
+    }
+    st.steps_now.push_back(res.iterations);
+    ++st.pcg_solves;
+    st.pcg_steps += res.iterations;
+    if(res.iterations > st.refactor_steps)
+      st.need_refactor = true;
+    if(!(res.stopped_on_abs || res.converged))
+      {
+        // on-demand refactor: form and factor Q now, exact solve for the
+        // rest of this iteration; the next iterations use the new factor
+        Scoped_Timer fallback_timer(*st.timers, "lab_fallback_refactor");
+        syrk_Q(*st.env, *st.P, *st.syrk_ctx, *st.Q, *st.timers,
+               *st.block_timings_ms, st.verbosity);
+        {
+          Scoped_Timer cholesky_timer(*st.timers, "Cholesky_Q");
+          El::Cholesky(El::UpperOrLowerNS::UPPER, *st.Q);
+        }
+        st.skip_Q = false;
+        st.Q_formed = true;
+        st.fallback = true;
+        st.need_refactor = false;
+        st.last_refactor = st.iteration;
+        ++st.fallbacks;
+        dy_dist = rhs;
+        El::cholesky::SolveAfter(El::UpperOrLowerNS::UPPER,
+                                 El::OrientationNS::NORMAL, *st.Q, dy_dist);
+        if(is_root())
+          write_line("{\"kind\":\"fallback\",\"it\":"
+                     + std::to_string(st.iteration) + ",\"phase\":"
+                     + std::to_string(st.phase) + "}");
+      }
+    st.t_pcg_now += seconds_since(t0);
   }
 
   void after_factor(const SDP &sdp, const Block_Info &block_info,
@@ -667,6 +846,48 @@ namespace lab235
     if(!enabled())
       return;
     auto &st = state();
+    if(st.inexact)
+      {
+        if(st.Q_formed)
+          {
+            // new factor U (Q = U^T U) and its explicit inverse
+            auto t0 = Clock::now();
+            Scoped_Timer inv_timer(*st.timers, "lab_triangular_inverse");
+            st.Q_hist.clear();
+            st.Qinv_hist.clear();
+            st.Q_hist.emplace_front(Q_chol);
+            El::MakeTrapezoidal(El::UpperOrLowerNS::UPPER, st.Q_hist.front());
+            st.Qinv_hist.emplace_front(st.Q_hist.front());
+            El::TriangularInverse(El::UpperOrLowerNS::UPPER,
+                                  El::UnitOrNonUnitNS::NON_UNIT,
+                                  st.Qinv_hist.front());
+            El::MakeTrapezoidal(El::UpperOrLowerNS::UPPER,
+                                st.Qinv_hist.front());
+            st.t_inv_now = seconds_since(t0);
+            ++st.refactors;
+          }
+        if(is_root())
+          {
+            std::ostringstream os;
+            os << "{\"kind\":\"istep\",\"it\":" << st.iteration
+               << ",\"refactor\":" << (st.Q_formed ? "true" : "false")
+               << ",\"reason\":\"" << (st.fallback ? "fallback" : st.refactor_reason)
+               << "\",\"stale\":" << (st.Q_formed ? 0 : st.iteration - st.last_refactor)
+               << ",\"rel\":" << fmt(st.rel_now)
+               << ",\"log10_Perr\":" << fmt(st.perr_log10)
+               << ",\"steps\":[";
+            for(size_t i = 0; i < st.steps_now.size(); ++i)
+              os << (i ? "," : "") << st.steps_now[i];
+            os << "],\"t_pcg\":" << fmt(st.t_pcg_now)
+               << ",\"t_inv\":" << fmt(st.t_inv_now)
+               << ",\"refactors\":" << st.refactors
+               << ",\"fallbacks\":" << st.fallbacks
+               << ",\"pcg_solves\":" << st.pcg_solves
+               << ",\"pcg_steps\":" << st.pcg_steps << "}";
+            write_line(os.str());
+          }
+        return;
+      }
     // Deep copies constructed in place: moving an El::DistMatrix into the deque
     // left it pointing at freed memory (smoke test: iteration 3 "equal" to 1).
     st.Q_hist.emplace_front(Q_chol);
@@ -724,6 +945,8 @@ namespace lab235
     if(!enabled())
       return;
     auto &st = state();
+    if(st.inexact) // #239: refactor iterations of the inexact mode solve exactly
+      return;
     Block_Vector work_P(work_P_template);
     const El::DistMatrix<El::BigFloat> x_exact(dy_dist);
     const El::BigFloat p_norm = max_abs(p);
@@ -744,7 +967,7 @@ namespace lab235
         const El::DistMatrix<El::BigFloat> *x0 = nullptr;
         if(st.warm_corrector && st.phase == 1 && st.warm[s].Height() > 0)
           x0 = &st.warm[s];
-        pcg(P, work_N, work_P, st.Q_hist[s - 1], rhs, x_exact, x0,
+        pcg(P, work_N, work_P, st.Q_hist[s - 1], rhs, &x_exact, x0,
             El::BigFloat(0), x, "measure", s, p_norm);
         if(st.phase == 0)
           st.warm[s] = x;
@@ -753,7 +976,7 @@ namespace lab235
     if(measure_here && st.prec_inv && !st.Qinv_hist.empty())
       {
         El::DistMatrix<El::BigFloat> x(rhs.Grid());
-        pcg(P, work_N, work_P, st.Q_hist[0], rhs, x_exact, nullptr,
+        pcg(P, work_N, work_P, st.Q_hist[0], rhs, &x_exact, nullptr,
             El::BigFloat(0), x, "measure-inv", 1, p_norm, 0, &st.Qinv_hist[0]);
       }
     // the two matvec forms on v = rhs: agreement and time
@@ -808,7 +1031,7 @@ namespace lab235
                          + std::to_string(nd) + ",\"out_of_range_local\":"
                          + std::to_string(oor_inputs) + "}");
             El::DistMatrix<El::BigFloat> x(rhs.Grid());
-            pcg(Pr, work_N, work_P, Ur, rhs_r, x_exact, nullptr,
+            pcg(Pr, work_N, work_P, Ur, rhs_r, &x_exact, nullptr,
                 El::BigFloat(0), x, "doubles", s, p_norm, nd);
           }
       }
@@ -818,7 +1041,7 @@ namespace lab235
         El::DistMatrix<El::BigFloat> x(rhs.Grid());
         int saved = st.pcg_max_iters;
         st.pcg_max_iters = 3;
-        pcg(P, work_N, work_P, Q_chol, rhs, x_exact, nullptr, El::BigFloat(0),
+        pcg(P, work_N, work_P, Q_chol, rhs, &x_exact, nullptr, El::BigFloat(0),
             x, "self", 0, p_norm);
         st.pcg_max_iters = saved;
       }
@@ -860,7 +1083,7 @@ namespace lab235
               = (st.prec_inv && size_t(s) <= st.Qinv_hist.size())
                   ? &st.Qinv_hist[s - 1]
                   : nullptr;
-            auto res = pcg(P, work_N, work_P, st.Q_hist[s - 1], rhs, x_exact,
+            auto res = pcg(P, work_N, work_P, st.Q_hist[s - 1], rhs, &x_exact,
                            x0, stop_abs, x, "use", s, p_norm, 0, Uinv);
             st.pcg_max_iters = saved;
             if(st.phase == 0)

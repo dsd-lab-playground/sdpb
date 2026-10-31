@@ -76,7 +76,8 @@ void SDP_Solver::step(
 
   El::BigFloat beta_predictor;
   // lab (agent) #235: off unless LAB235_DIR is set
-  lab235::begin_step(primal_error(), parameters.primal_error_threshold);
+  lab235::begin_step(primal_error(), parameters.primal_error_threshold,
+                     primal_error_P);
 
   // Search direction: These quantities have the same structure
   // as (x, X, y, Y). They are computed twice each iteration:
@@ -121,6 +122,11 @@ void SDP_Solver::step(
       {
         print_allocation_message_per_node(env, "Q", get_allocated_bytes(Q));
       }
+
+    // lab (agent) #239: context for an on-demand refactor in the inexact mode
+    lab235::set_step_context(env, bigint_syrk_context, timers,
+                             block_timings_ms, verbosity, Q,
+                             schur_off_diagonal);
 
     // Compute SchurComplement and prepare to solve the Schur
     // complement equation for dx, dy
@@ -191,7 +197,9 @@ void SDP_Solver::step(
     }
 
     // Calculate condition numbers for Cholesky matrices
-    update_cond_numbers(Q, block_info, schur_complement_cholesky, X_cholesky,
+    // lab (agent) #239: without Q this iteration, the last refactor's factor
+    update_cond_numbers(lab235::cond_factor(Q), block_info,
+                        schur_complement_cholesky, X_cholesky,
                         Y_cholesky, timers, Q_cond_number,
                         max_block_cond_number, max_block_cond_number_name);
     lab235::end_step(schur_complement_cholesky, Q);

@@ -20,12 +20,38 @@
 //      factor of the last multiple of m ("refactor every m iterations").
 // Output: JSON lines in $LAB235_DIR/lab235.jsonl (rank 0), eigenvalues in
 // $LAB235_DIR/eig-Q-it<k>-s<s>.txt.
+//
+// lab (agent) #239: (5) LAB235_INEXACT=1 is a real inexact solver mode, not a
+// measurement: Q = sum_j P_j^T P_j is formed (syrk) and factored (Cholesky_Q)
+// only on refactor iterations, and U^-1 is formed there once
+// (El::TriangularInverse). On the other iterations SDPB skips the syrk and
+// Cholesky_Q altogether and solves Q dy = rhs (predictor and corrector) by PCG
+// with the matvec sum_j P_j^T (P_j v) and the preconditioner U^-1 U^-T of the
+// last refactor. A refactor happens on the run's first iteration, when
+// LAB235_USE_PERIOD iterations have passed since the last one, after a solve
+// that took more than LAB235_REFACTOR_STEPS PCG steps, and on demand inside a
+// solve whose PCG does not reach its target within LAB235_USE_MAX steps (Q is
+// then formed and factored there and SDPB's exact solve is used for the rest
+// of the step). Forcing: stop at
+//   |r|_inf <= max(rel_k |rhs|_inf, eta x max(primal error, thr floor)),
+//   rel_k = clamp(LAB235_USE_REL x (Perr_k / Perr_1)^LAB235_REL_GAMMA,
+//                 LAB235_REL_MIN, LAB235_USE_REL),
+// Perr_k the matrix primal residual |P| at the start of iteration k (not |p|,
+// which the inexact solves themselves pollute) and Perr_1 its value at the
+// run's first iteration: the forcing tightens as the primal error falls.
+// Timers: lab_pcg (in computeSearchDirection), lab_triangular_inverse,
+// lab_fallback_refactor; one JSON line per iteration ("istep").
 
 #include "sdp_solve/Block_Diagonal_Matrix.hxx"
 #include "sdp_solve/Block_Info.hxx"
 #include "sdp_solve/Block_Matrix.hxx"
 #include "sdp_solve/Block_Vector.hxx"
 #include "sdp_solve/SDP.hxx"
+#include "sdpb_util/Environment.hxx"
+#include "sdpb_util/Timers/Timers.hxx"
+#include "sdpb_util/Verbosity.hxx"
+
+class BigInt_Shared_Memory_Syrk_Context;
 
 #include <El.hpp>
 
@@ -77,6 +103,33 @@ namespace lab235
     const SDP *sdp = nullptr;                          // set in after_factor for this step
     const Block_Diagonal_Matrix *L_now = nullptr;      // this step's Schur Cholesky factors
     std::ofstream log;
+
+    // #239 inexact solver mode (LAB235_INEXACT=1)
+    bool inexact = false;
+    int refactor_steps = 12;         // LAB235_REFACTOR_STEPS
+    double rel_min = 1e-8;           // LAB235_REL_MIN
+    double rel_gamma = 0.1;          // LAB235_REL_GAMMA
+    bool perr_ref_set = false;
+    double perr_ref_log10 = 0;       // log10 |P| at the run's first iteration
+    double perr_log10 = 0;           // log10 |P| at the start of this iteration
+    double rel_now = 0;              // rel_k of this iteration
+    bool skip_Q = false;             // this iteration: Q not formed (PCG solves)
+    bool Q_formed = true;            // this iteration: Q formed and factored
+    int last_refactor = 0;           // iteration of the last refactor
+    bool need_refactor = false;      // set by a slow solve: refactor next iteration
+    std::string refactor_reason;
+    bool fallback = false;           // this iteration: refactor on demand inside a solve
+    std::vector<int> steps_now;      // PCG steps of this iteration's solves
+    double t_pcg_now = 0, t_inv_now = 0;
+    int refactors = 0, fallbacks = 0, pcg_solves = 0, pcg_steps = 0;
+    // context for an on-demand refactor (set in SDP_Solver::step)
+    const Environment *env = nullptr;
+    BigInt_Shared_Memory_Syrk_Context *syrk_ctx = nullptr;
+    Timers *timers = nullptr;
+    El::Matrix<int32_t> *block_timings_ms = nullptr;
+    Verbosity verbosity = Verbosity::regular;
+    El::DistMatrix<El::BigFloat> *Q = nullptr;
+    Block_Matrix *P = nullptr;
   };
 
   State &state();
@@ -84,7 +137,25 @@ namespace lab235
   bool enabled();
   void begin_run();
   void begin_step(const El::BigFloat &primal_error,
-                  const El::BigFloat &primal_error_threshold);
+                  const El::BigFloat &primal_error_threshold,
+                  const El::BigFloat &primal_error_P);
+  // #239: context for an on-demand refactor, set once Q and P exist
+  void set_step_context(const Environment &env,
+                        BigInt_Shared_Memory_Syrk_Context &syrk_ctx,
+                        Timers &timers, El::Matrix<int32_t> &block_timings_ms,
+                        Verbosity verbosity, El::DistMatrix<El::BigFloat> &Q,
+                        Block_Matrix &P);
+  // #239: true when this iteration's Schur solves are PCG (Q not formed)
+  bool skip_Q();
+  // #239: the factor whose diagonal gives SDPB's printed Q condition number
+  const El::DistMatrix<El::BigFloat> &
+  cond_factor(const El::DistMatrix<El::BigFloat> &Q);
+  // #239: inexact Schur solve. rhs in dy_dist on entry, PCG solution on exit
+  // (or SDPB's exact solution after an on-demand refactor)
+  void inexact_solve(const Block_Matrix &P, Block_Vector &work_N,
+                     const Block_Vector &work_P,
+                     const El::DistMatrix<El::BigFloat> &p,
+                     El::DistMatrix<El::BigFloat> &dy_dist);
   void after_factor(const SDP &sdp, const Block_Info &block_info,
                     const Block_Diagonal_Matrix &schur_complement_cholesky,
                     const El::DistMatrix<El::BigFloat> &Q_chol);

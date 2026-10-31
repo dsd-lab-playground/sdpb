@@ -71,10 +71,20 @@ void solve_schur_complement_equation(
     lab_rhs = dy_dist;
 
   // dy_dist = Q^{-1}.dy_dist
-  El::cholesky::SolveAfter(El::UpperOrLowerNS::UPPER,
-                           El::OrientationNS::NORMAL, Q, dy_dist);
-  if(lab235::enabled())
-    lab235::solve_hook(schur_off_diagonal, dy, dx, Q, lab_rhs, lab_p, dy_dist);
+  if(lab235::skip_Q())
+    {
+      // lab (agent) #239: inexact mode, Q not formed: PCG with the last
+      // refactor's factor (or an on-demand refactor)
+      lab235::inexact_solve(schur_off_diagonal, dy, dx, lab_p, dy_dist);
+    }
+  else
+    {
+      El::cholesky::SolveAfter(El::UpperOrLowerNS::UPPER,
+                               El::OrientationNS::NORMAL, Q, dy_dist);
+      if(lab235::enabled())
+        lab235::solve_hook(schur_off_diagonal, dy, dx, Q, lab_rhs, lab_p,
+                           dy_dist);
+    }
   El::DistMatrix<El::BigFloat, El::STAR, El::STAR> dy_local(dy_dist);
 
   // dx += schur_off_diagonal.dy
