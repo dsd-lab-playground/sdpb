@@ -100,12 +100,13 @@ void initialize_schur_complement_solver(
     {
       if(multimodular_cholesky_Q > 0)
         {
-          // El's blocked Cholesky with the trailing updates by
-          // multimodular BLAS, see multimodular_cholesky_dist.cxx
+          // El's blocked Cholesky with the trailing updates and the
+          // diagonal blocks by multimodular BLAS, see
+          // multimodular_cholesky_dist.cxx
           Multimodular_Blas_Config config;
           Multimodular_Cholesky_Dist_Timings t;
           multimodular_cholesky_upper_dist(Q, int(multimodular_cholesky_Q),
-                                           false, config, t, &timers);
+                                           true, config, t, &timers);
         }
       else
         Cholesky(El::UpperOrLowerNS::UPPER, Q);
