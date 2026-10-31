@@ -17,7 +17,9 @@
 // all ranks by one AllReduce and broadcast back after the solve).
 //
 // The ranks of a sub-grid are the first r in (node, rank on node) order, so
-// r = k * (ranks per node) gives the ranks of k whole nodes. The grid is
+// r = k * (ranks per node) gives the ranks of k whole nodes (with
+// SDPB_Q_GRID_ORDER=spread: (rank on node, node) order, so r = k * (number of
+// nodes) gives k ranks on every node). The grid is
 // h x (r / h) with h the largest divisor of r not above sqrt(r).
 // World rank 0 is always in both sub-grids.
 class Q_Grids

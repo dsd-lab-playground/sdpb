@@ -3,6 +3,8 @@
 #include "sdpb_util/assert.hxx"
 
 #include <algorithm>
+#include <cstdlib>
+#include <string>
 #include <cmath>
 #include <vector>
 
@@ -20,12 +22,18 @@ namespace
     const int mine[2] = {env.node_index(), env.comm_shared_mem.Rank()};
     std::vector<int> all(2 * num_ranks);
     El::mpi::AllGather(mine, 2, all.data(), 2, El::mpi::COMM_WORLD);
+    // SDPB_Q_GRID_ORDER=spread (experiment): (rank on node, node) order
+    // instead, so r = k * (number of nodes) takes k ranks on every node
+    const char *order_env = std::getenv("SDPB_Q_GRID_ORDER");
+    const bool spread
+      = order_env != nullptr && std::string(order_env) == "spread";
     std::vector<int> ranks(num_ranks);
     for(int i = 0; i < num_ranks; ++i)
       ranks[i] = i;
     std::stable_sort(ranks.begin(), ranks.end(), [&](int a, int b) {
-      return std::make_pair(all[2 * a], all[2 * a + 1])
-             < std::make_pair(all[2 * b], all[2 * b + 1]);
+      const int ka = spread ? 1 : 0, kb = spread ? 0 : 1;
+      return std::make_pair(all[2 * a + ka], all[2 * a + kb])
+             < std::make_pair(all[2 * b + ka], all[2 * b + kb]);
     });
     ranks.resize(r);
     ASSERT_EQUAL(ranks.at(0), 0, "world rank 0 must lead the Q sub-grid");
