@@ -47,7 +47,7 @@ dimension, precision, ranks) and waits.
 
 | `cmd` | fields | does |
 |---|---|---|
-| `solve` | `args`, `start`, `checkpoint`, `write_solution`, `derived` | run the solver |
+| `solve` | `args`, `inherit`, `start`, `checkpoint`, `write_solution`, `derived` | run the solver |
 | `update_pmp` | `pmp` | replace the changed blocks (and the objective) from PMP files, converted in memory |
 | `update_sdp` | `sdp`, `blocks` | re-read blocks and the objective from an SDP directory written by pmp2sdp |
 | `load_family` | `name`, `block`, `components`, `form_dim`, `normalization_file` | make a block parametric: c = Σ w_i c_i, B = Σ w_i B_i |
@@ -66,6 +66,11 @@ dimension, precision, ranks) and waits.
   same values as in an `sdpb` run. `--precision`, `--sparseB`, `--maxSharedMemory` and `--procGranularity` are fixed
   at start-up. Boolean switches given at start-up cannot be turned off per solve. An `--sdpDir` in `args` must name
   the SDP in memory (the last `update_sdp` directory, or the start-up one); to solve another SDP, update first.
+- `inherit` (default true): with `false`, the solve's options are its `args` only, as for an `sdpb` run with that
+  command line; nothing is taken from the start-up command line (the options fixed at start-up must still agree).
+  A drop-in replacement for `sdpb` should use it: with inheritance, a switch that the first call gave (say
+  `--detectPrimalFeasibleJump`) stays on in every later solve. `ready.json` lists `"solve_inherit"` in `features`
+  (lab bootstrap-speed#238).
 - `start`: `"current"` (default: the iterate in memory), `"initial"` (X = Ω_p I, Y = Ω_d I, x = y = 0), `"checkpoint"`
   (load from the solve's `--initialCheckpointDir`/`--checkpointDir`), or `{"iterate": "<name>"}`.
 - `checkpoint` (default false): write a checkpoint to `--checkpointDir` after the solve. Without it, no checkpoint is

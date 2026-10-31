@@ -511,6 +511,11 @@ namespace
     w.Bool(loaded_checkpoint);
     w.Key("load_seconds");
     w.Double(load_seconds);
+    // Protocol features a driver may check for (lab #238: solve "inherit")
+    w.Key("features");
+    w.StartArray();
+    w.String("solve_inherit");
+    w.EndArray();
     w.EndObject();
     return sb.GetString();
   }
@@ -672,7 +677,9 @@ namespace
   // solve: run the solver from the current (or a named) iterate.
   // "args": an sdpb command line for this solve (outDir, checkpointDir,
   // thresholds, maxIterations, ...); options it lacks come from the resident
-  // process's command line.
+  // process's command line, unless "inherit" is false (lab #238): then the
+  // solve's options are its own args only, exactly as for an sdpb run with
+  // that command line (the options fixed at start-up are still checked).
   void Resident_State::cmd_solve(const rapidjson::Value &command,
                                  Json_Writer &w, bool &keep_running)
   {
@@ -682,12 +689,13 @@ namespace
     std::vector<std::string> args, derived;
     std::optional<SDPB_Parameters> parsed;
     std::string start_kind = "current", start_iterate;
-    bool with_checkpoint = false, with_solution = true;
+    bool with_checkpoint = false, with_solution = true, inherit = true;
     consistently([&] {
       args = get_string_list(command, "args");
       derived = get_string_list(command, "derived");
       with_checkpoint = get_bool(command, "checkpoint", false);
       with_solution = get_bool(command, "write_solution", true);
+      inherit = get_bool(command, "inherit", true);
       // The SDP is the one in memory: a different --sdpDir is a mistake
       // (decided on rank 0: file system checks may differ between ranks)
       const auto sdp_dir = find_option(args, "--sdpDir", "-s");
@@ -707,8 +715,12 @@ namespace
       mpf_set_default_prec(startup_precision);
       try
         {
-          parsed.emplace(
-            std::vector<std::vector<std::string>>{args, startup_args}, true);
+          if(inherit)
+            parsed.emplace(
+              std::vector<std::vector<std::string>>{args, startup_args},
+              true);
+          else
+            parsed.emplace(std::vector<std::vector<std::string>>{args}, true);
         }
       catch(...)
         {
