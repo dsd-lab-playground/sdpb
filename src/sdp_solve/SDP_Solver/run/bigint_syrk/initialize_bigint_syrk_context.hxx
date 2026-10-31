@@ -6,6 +6,8 @@
 #include "sdp_solve/SDP.hxx"
 #include "sdpb_util/assert.hxx"
 
+#include <memory>
+
 // parent_comm is split into child_comms.
 // We assign child_index = [0..num_children) to each child_comm
 // and return {child_index, [child_comm.Size() for each child], num_children}
@@ -112,4 +114,21 @@ initialize_bigint_syrk_context(const Environment &env,
     El::gmp::Precision(), max_shared_memory_bytes,
     info.blocks_height_per_group, info.block_width, block_info.block_indices,
     verbosity);
+}
+
+// Same as initialize_bigint_syrk_context(), on the heap, so that it can be
+// kept between solver runs (resident mode, sdpb --controlDir).
+inline std::unique_ptr<BigInt_Shared_Memory_Syrk_Context>
+make_bigint_syrk_context(const Environment &env, const Block_Info &block_info,
+                         const SDP &sdp, const size_t max_shared_memory_bytes,
+                         const Verbosity verbosity)
+{
+  const Grouped_Block_Size_Info info(env, block_info, sdp);
+
+  return std::unique_ptr<BigInt_Shared_Memory_Syrk_Context>(
+    new BigInt_Shared_Memory_Syrk_Context(
+      env.comm_shared_mem, info.group_index, info.group_comm_sizes,
+      El::gmp::Precision(), max_shared_memory_bytes,
+      info.blocks_height_per_group, info.block_width,
+      block_info.block_indices, verbosity));
 }

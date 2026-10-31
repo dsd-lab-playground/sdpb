@@ -55,8 +55,9 @@ private:
   El::mpi::Comm shared_memory_comm;
   // Index of MPI group on a node
   size_t group_index;
-  // Sizes of MPI groups on a node
-  const std::vector<int> &group_comm_sizes;
+  // Sizes of MPI groups on a node (a copy: the context may outlive the
+  // caller's vector, e.g. kept between solver runs in resident mode)
+  const std::vector<int> group_comm_sizes;
   // Number of MPI groups on a node
   size_t num_groups;
   int total_block_height_per_node;

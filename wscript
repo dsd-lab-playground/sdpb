@@ -131,12 +131,15 @@ def build(bld):
                         'src/sdpb/solve.cxx',
                         'src/sdpb/write_timing.cxx',
                         'src/sdpb/SDPB_Parameters.cxx',
-                        'src/sdpb/save_solution.cxx'],
+                        'src/sdpb/save_solution.cxx',
+                        'src/sdpb/resident/Control_Channel.cxx',
+                        'src/sdpb/resident/Resident.cxx'],
                 target='sdpb',
                 cxxflags=default_flags,
                 defines=default_defines,
                 includes=default_includes,
-                use=use_packages + ['sdp_solve', 'mpsolve']
+                use=use_packages + ['sdp_solve', 'mpsolve', 'pmp_read',
+                                    'pmp', 'pmp2sdp_lib']
                 )
 
     # lab #226: Cholesky_Q benchmark (El vs multimodular trailing update)
@@ -157,6 +160,7 @@ def build(bld):
                        'src/pmp2sdp/write_normalization_json.cxx',
                        'src/pmp2sdp/write_sdp.cxx',
                        'src/pmp2sdp/write_control_json.cxx',
+                       'src/pmp2sdp/Reuse_SDP.cxx',
                        'src/pmp2sdp/Archive_Writer.cxx',
                        'src/pmp2sdp/Archive_Entry.cxx'
                        ]
@@ -318,6 +322,7 @@ def build(bld):
                         'test/src/integration_tests/cases/end-to-end.test.cxx',
                         'test/src/integration_tests/cases/outer_limits.test.cxx',
                         'test/src/integration_tests/cases/pmp2sdp.test.cxx',
+                        'test/src/integration_tests/cases/resident.test.cxx',
                         'test/src/integration_tests/cases/sdpb.test.cxx'],
                 target='integration_tests',
                 install_path=None,

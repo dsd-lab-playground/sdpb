@@ -28,12 +28,19 @@ void write_block_timings(const fs::path &checkpoint_out,
 
 void write_profiling(const fs::path &checkpoint_out, const Timers &timers);
 
+void run_resident(const Environment &env, const SDPB_Parameters &parameters,
+                  const std::vector<std::string> &startup_args,
+                  mp_bitcnt_t startup_precision, const Block_Info &block_info);
+
 int main(int argc, char **argv)
 {
   Environment env(argc, argv);
 
   try
     {
+      // The options are parsed at GMP's precision before set_precision()
+      // (resident mode parses its solve commands at the same precision)
+      const mp_bitcnt_t startup_precision = El::gmp::Precision();
       SDPB_Parameters parameters(argc, argv);
       if(!parameters.is_valid())
         {
@@ -160,6 +167,14 @@ int main(int argc, char **argv)
                         parameters.solver.checkpoint_out / "block_timings",
                         fs::copy_options::overwrite_existing);
             }
+        }
+      if(!parameters.control_dir.empty())
+        {
+          // Resident mode (sdpb --controlDir): solve on command
+          run_resident(env, parameters,
+                       std::vector<std::string>(argv + 1, argv + argc),
+                       startup_precision, block_info);
+          return 0;
         }
       El::Matrix<int32_t> block_timings_ms;
       Timers timers(

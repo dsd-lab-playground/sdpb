@@ -189,7 +189,8 @@ SDP_Solver_Terminate_Reason SDP_Solver::run(
   const Block_Info &block_info, const SDP &sdp, const El::Grid &grid,
   const std::chrono::time_point<std::chrono::high_resolution_clock> &start_time,
   const fs::path &iterations_json_path, Timers &timers,
-  El::Matrix<int32_t> &block_timings_ms)
+  El::Matrix<int32_t> &block_timings_ms,
+  std::unique_ptr<BigInt_Shared_Memory_Syrk_Context> *persistent_syrk_context)
 {
   SDP_Solver_Terminate_Reason terminate_reason(
     SDP_Solver_Terminate_Reason::MaxIterationsExceeded);
@@ -248,11 +249,19 @@ SDP_Solver_Terminate_Reason SDP_Solver::run(
   Scoped_Timer initialize_bigint_syrk_context_timer(timers,
                                                     "bigint_syrk_context");
 
-  auto max_shared_memory_bytes
-    = get_max_shared_memory_bytes(parameters.max_shared_memory_bytes, env,
-                                  block_info, sdp, *this, verbosity);
-  auto bigint_syrk_context = initialize_bigint_syrk_context(
-    env, block_info, sdp, max_shared_memory_bytes, verbosity);
+  std::unique_ptr<BigInt_Shared_Memory_Syrk_Context> local_syrk_context;
+  auto &syrk_context_ptr = persistent_syrk_context != nullptr
+                             ? *persistent_syrk_context
+                             : local_syrk_context;
+  if(!syrk_context_ptr)
+    {
+      auto max_shared_memory_bytes = get_max_shared_memory_bytes(
+        parameters.max_shared_memory_bytes, env, block_info, sdp, *this,
+        verbosity);
+      syrk_context_ptr = make_bigint_syrk_context(
+        env, block_info, sdp, max_shared_memory_bytes, verbosity);
+    }
+  auto &bigint_syrk_context = *syrk_context_ptr;
   initialize_bigint_syrk_context_timer.stop();
 
   // lab #143: optional sub-grids for Cholesky(Q) and the Q solves
@@ -324,6 +333,7 @@ SDP_Solver_Terminate_Reason SDP_Solver::run(
     }
 
   print_header(verbosity);
+  num_steps = 0;
   for(size_t iteration = 1;; ++iteration)
     {
       Scoped_Timer iteration_timer(timers,
@@ -464,6 +474,7 @@ SDP_Solver_Terminate_Reason SDP_Solver::run(
             = SDP_Solver_Terminate_Reason::MaxComplementarityExceeded;
           break;
         }
+      num_steps = iteration;
       Scoped_Timer print_iteration_timer(timers, "print_iteration");
       print_iteration(iterations_json_path, iteration, mu, primal_step_length,
                       dual_step_length, beta_corrector, *this,

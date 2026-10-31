@@ -2,6 +2,7 @@
 
 #include "write_vector.hxx"
 #include "pmp/PMP_Info.hxx"
+#include "Reuse_SDP.hxx"
 #include "sdpb_util/Boost_Float.hxx"
 #include "sdpb_util/assert.hxx"
 #include "sdpb_util/json/Json_Writer.hxx"
@@ -9,6 +10,54 @@
 #include <El.hpp>
 
 #include <ostream>
+
+inline void write_pvm_info_json(Json_Writer &writer, const PVM_Info &block,
+                                const size_t num_blocks)
+{
+  block.validate(num_blocks);
+  writer.StartObject();
+  writer.Key("index");
+  {
+    writer.Int(block.block_index);
+  }
+  writer.Key("path");
+  {
+    writer.String(block.block_path.string().c_str());
+  }
+  writer.Key("dim");
+  {
+    writer.Uint64(block.dim);
+  }
+  writer.Key("prefactor");
+  {
+    writer.StartObject();
+    writer.Key("constant");
+    writer.BigFloat(block.prefactor.constant);
+    writer.Key("base");
+    writer.BigFloat(block.prefactor.base);
+    writer.Key("poles");
+    writer.BigFloatArray(block.prefactor.poles);
+    writer.EndObject();
+  }
+  writer.Key("reducedPrefactor");
+  {
+    writer.StartObject();
+    writer.Key("constant");
+    writer.BigFloat(block.reduced_prefactor.constant);
+    writer.Key("base");
+    writer.BigFloat(block.reduced_prefactor.base);
+    writer.Key("poles");
+    writer.BigFloatArray(block.reduced_prefactor.poles);
+    writer.EndObject();
+  }
+  writer.Key("samplePoints");
+  writer.BigFloatArray(block.sample_points);
+  writer.Key("sampleScalings");
+  writer.BigFloatArray(block.sample_scalings);
+  writer.Key("reducedSampleScalings");
+  writer.BigFloatArray(block.reduced_sample_scalings);
+  writer.EndObject();
+}
 
 inline void write_pmp_info_json(std::ostream &output_stream,
                                 const std::vector<PVM_Info> &pmp_info)
@@ -19,54 +68,73 @@ inline void write_pmp_info_json(std::ostream &output_stream,
 
   writer.StartArray();
   for(const auto &block : pmp_info)
-    {
-      block.validate(pmp_info.size());
-      writer.StartObject();
-      writer.Key("index");
-      {
-        writer.Int(block.block_index);
-      }
-      writer.Key("path");
-      {
-        writer.String(block.block_path.string().c_str());
-      }
-      writer.Key("dim");
-      {
-        writer.Uint64(block.dim);
-      }
-      writer.Key("prefactor");
-      {
-        writer.StartObject();
-        writer.Key("constant");
-        writer.BigFloat(block.prefactor.constant);
-        writer.Key("base");
-        writer.BigFloat(block.prefactor.base);
-        writer.Key("poles");
-        writer.BigFloatArray(block.prefactor.poles);
-        writer.EndObject();
-      }
-      writer.Key("reducedPrefactor");
-      {
-        writer.StartObject();
-        writer.Key("constant");
-        writer.BigFloat(block.reduced_prefactor.constant);
-        writer.Key("base");
-        writer.BigFloat(block.reduced_prefactor.base);
-        writer.Key("poles");
-        writer.BigFloatArray(block.reduced_prefactor.poles);
-        writer.EndObject();
-      }
-      writer.Key("samplePoints");
-      writer.BigFloatArray(block.sample_points);
-      writer.Key("sampleScalings");
-      writer.BigFloatArray(block.sample_scalings);
-      writer.Key("reducedSampleScalings");
-      writer.BigFloatArray(block.reduced_sample_scalings);
-      writer.EndObject();
-    }
+    write_pvm_info_json(writer, block, pmp_info.size());
 
   writer.EndArray();
   ASSERT(writer.IsComplete());
+}
+
+// Same output as write_pmp_info_json(), for an SDP with blocks reused from
+// an old SDP: reused entries are copied from the old pmp_info.json.
+inline void write_pmp_info_json(std::ostream &output_stream,
+                                const std::vector<PVM_Info> &pmp_info,
+                                const Reused_SDP &reuse)
+{
+  ASSERT_EQUAL(El::mpi::Rank(), 0);
+  ASSERT_EQUAL(reuse.new_to_old.size(), pmp_info.size());
+  rapidjson::OStreamWrapper ows(output_stream);
+  output_stream << '[';
+  for(size_t index = 0; index < pmp_info.size(); ++index)
+    {
+      if(index != 0)
+        output_stream << ',';
+      const auto &old_index = reuse.new_to_old.at(index);
+      if(old_index.has_value())
+        {
+          output_stream << reuse.renumbered_pmp_info_entry(old_index.value(),
+                                                           index);
+        }
+      else
+        {
+          ows.Flush();
+          Json_Writer writer(ows);
+          write_pvm_info_json(writer, pmp_info.at(index), pmp_info.size());
+          ASSERT(writer.IsComplete());
+          ows.Flush();
+        }
+    }
+  output_stream << ']';
+}
+
+// Send a Boost_Float exactly: its MPFR precision and an exact hex string.
+// (Converting it to El::BigFloat and back rounds it, so pmp_info.json
+// depended on which rank owned each block.)
+inline void send_boost_float_exact(const Boost_Float &value, const int to,
+                                   const El::mpi::Comm &comm)
+{
+  const auto &x = value.backend().data();
+  char *str = nullptr;
+  ASSERT(mpfr_asprintf(&str, "%Ra", x) >= 0);
+  const std::string hex(str);
+  mpfr_free_str(str);
+  El::mpi::Send<size_t>(mpfr_get_prec(x), to, comm);
+  El::mpi::Send<size_t>(hex.size(), to, comm);
+  MPI_Send(hex.data(), hex.size(), MPI_CHAR, to, 0, comm.comm);
+}
+
+inline Boost_Float
+recv_boost_float_exact(const int from, const El::mpi::Comm &comm)
+{
+  const auto prec = El::mpi::Recv<size_t>(from, comm);
+  std::string hex(El::mpi::Recv<size_t>(from, comm), '\0');
+  MPI_Recv(hex.data(), hex.size(), MPI_CHAR, from, 0, comm.comm,
+           MPI_STATUS_IGNORE);
+  Boost_Float result;
+  auto &x = result.backend().data();
+  mpfr_set_prec(x, prec);
+  ASSERT(mpfr_set_str(x, hex.c_str(), 0, MPFR_RNDN) == 0, "Cannot parse ",
+         hex);
+  return result;
 }
 
 // Send from rank='from' to rank=0
@@ -124,23 +192,21 @@ inline void synchronize_pvm_info(PVM_Info &pvm_info, const int from)
       auto &damped_rational = *damped_rational_ptr;
       if(rank == from)
         {
-          El::mpi::Send(to_BigFloat(damped_rational.constant), to, comm);
-          El::mpi::Send(to_BigFloat(damped_rational.base), to, comm);
-          const auto poles = to_BigFloat_Vector(damped_rational.poles);
-          El::mpi::Send<size_t>(poles.size(), to, comm);
-          El::mpi::Send(poles.data(), poles.size(), to, comm);
+          send_boost_float_exact(damped_rational.constant, to, comm);
+          send_boost_float_exact(damped_rational.base, to, comm);
+          El::mpi::Send<size_t>(damped_rational.poles.size(), to, comm);
+          for(const auto &pole : damped_rational.poles)
+            send_boost_float_exact(pole, to, comm);
         }
       if(rank == to)
         {
-          damped_rational.constant
-            = to_Boost_Float(El::mpi::Recv<El::BigFloat>(from, comm));
-          damped_rational.base
-            = to_Boost_Float(El::mpi::Recv<El::BigFloat>(from, comm));
+          damped_rational.constant = recv_boost_float_exact(from, comm);
+          damped_rational.base = recv_boost_float_exact(from, comm);
 
           const size_t num_poles = El::mpi::Recv<size_t>(from, comm);
-          std::vector<El::BigFloat> poles(num_poles);
-          El::mpi::Recv(poles.data(), poles.size(), from, comm);
-          damped_rational.poles = to_Boost_Float_Vector(poles);
+          damped_rational.poles.resize(num_poles);
+          for(auto &pole : damped_rational.poles)
+            pole = recv_boost_float_exact(from, comm);
         }
     }
   for(auto vec_ptr : {&pvm_info.sample_points, &pvm_info.sample_scalings,
@@ -191,6 +257,9 @@ synchronize_pmp_info_blocks(const PMP_Info &pmp_info)
   for(size_t block_index = 0; block_index < pmp_info.num_blocks; ++block_index)
     {
       const int from = block_ranks.at(block_index);
+      // Blocks reused by pmp2sdp --reuseSdp are on no rank
+      if(from == -1)
+        continue;
       synchronize_pvm_info(all_pvm_infos.at(block_index), from);
     }
   return all_pvm_infos;
