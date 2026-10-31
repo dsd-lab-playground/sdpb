@@ -48,6 +48,8 @@ namespace lab235
     std::vector<int> pcg_iters;      // iterations with measurement PCG (empty: all)
     std::vector<int> pcg_phases;     // phases with measurement PCG (0 predictor, 1 corrector)
     int use_max_iters = 300;         // PCG cap in use mode
+    std::vector<int> pcg_doubles;    // reduced-precision PCG runs: storage as sums of nd doubles
+    int pcg_doubles_stale = 1;       // their stale level
     bool self_control = true;        // U_new against itself, once
     bool self_done = false;
     int pcg_max_iters = 300;

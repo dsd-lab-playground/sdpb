@@ -84,6 +84,47 @@ namespace lab235
       return El::mpi::AllReduce(local, El::mpi::MAX, El::mpi::COMM_WORLD);
     }
 
+    // Emulated storage precision: x := the sum of nd doubles closest (by
+    // successive truncation) to x, i.e. ~53*nd bits (nd = 2: double-double,
+    // 4: quad-double). Values outside double's exponent range are left alone
+    // and counted.
+    long round_out_of_range = 0;
+    void round_bf(El::BigFloat &x, int nd)
+    {
+      if(nd <= 0 || x == El::BigFloat(0))
+        return;
+      long e = 0;
+      mpf_get_d_2exp(&e, x.gmp_float.get_mpf_t());
+      if(e > 1000 || e < -960)
+        {
+          ++round_out_of_range;
+          return;
+        }
+      El::BigFloat y(x), acc(0);
+      for(int i = 0; i < nd; ++i)
+        {
+          double d = double(y);
+          if(d == 0.0)
+            break;
+          El::BigFloat bd(d);
+          acc += bd;
+          y -= bd;
+        }
+      x = acc;
+    }
+    void round_mat(El::DistMatrix<El::BigFloat> &A, int nd)
+    {
+      if(nd <= 0)
+        return;
+      for(int64_t i = 0; i < A.LocalHeight(); ++i)
+        for(int64_t j = 0; j < A.LocalWidth(); ++j)
+          {
+            El::BigFloat v = A.GetLocal(i, j);
+            round_bf(v, nd);
+            A.SetLocal(i, j, v);
+          }
+    }
+
     El::BigFloat dot(const El::DistMatrix<El::BigFloat> &a,
                      const El::DistMatrix<El::BigFloat> &b)
     {
@@ -288,7 +329,8 @@ namespace lab235
                    const El::DistMatrix<El::BigFloat> &x_exact,
                    const El::DistMatrix<El::BigFloat> *x0,
                    const El::BigFloat &stop_abs, El::DistMatrix<El::BigFloat> &x,
-                   const std::string &label, int s, const El::BigFloat &p_norm)
+                   const std::string &label, int s, const El::BigFloat &p_norm,
+                   int nd = 0)
     {
       auto &st = state();
       auto t0 = Clock::now();
@@ -302,6 +344,8 @@ namespace lab235
 
       El::DistMatrix<El::BigFloat> r(rhs), z(rhs.Grid()), p(rhs.Grid()),
         q(rhs.Grid()), d(rhs.Grid());
+      round_mat(r, nd);
+      const long oor0 = round_out_of_range;
       El::Zeros(q, rhs.Height(), 1);
       if(x0 != nullptr)
         {
@@ -310,7 +354,9 @@ namespace lab235
           apply_Q(P, work_N, work_P, x, q);
           t_mv += seconds_since(t1);
           ++n_mv;
+          round_mat(q, nd);
           El::Axpy(El::BigFloat(-1), q, r);
+          round_mat(r, nd);
         }
       else
         {
@@ -335,6 +381,7 @@ namespace lab235
                                  El::OrientationNS::NORMAL, U_old, z);
         t_pc += seconds_since(t1);
         ++n_pc;
+        round_mat(z, nd);
       }
       p = z;
       El::BigFloat rz = dot(r, z);
@@ -356,10 +403,14 @@ namespace lab235
           apply_Q(P, work_N, work_P, p, q);
           t_mv += seconds_since(t1);
           ++n_mv;
+          round_mat(q, nd);
           El::BigFloat pq = dot(p, q);
           El::BigFloat alpha = rz / pq;
+          round_bf(alpha, nd);
           El::Axpy(alpha, p, x);
           El::Axpy(-alpha, q, r);
+          round_mat(x, nd);
+          round_mat(r, nd);
           rn = record();
           res.iterations = k;
           z = r;
@@ -368,12 +419,15 @@ namespace lab235
                                    El::OrientationNS::NORMAL, U_old, z);
           t_pc += seconds_since(t1);
           ++n_pc;
+          round_mat(z, nd);
           El::BigFloat rz_new = dot(r, z);
           El::BigFloat beta = rz_new / rz;
+          round_bf(beta, nd);
           rz = rz_new;
           // p = z + beta p
           El::Scale(beta, p);
           El::Axpy(El::BigFloat(1), z, p);
+          round_mat(p, nd);
           alphas.push_back(double(alpha));
           betas.push_back(double(beta));
         }
@@ -404,7 +458,9 @@ namespace lab235
              << ",\"log10_xs\":" << fmt(log10_abs(xs_norm))
              << ",\"log10_true_res_rel\":"
              << fmt(log10_abs(true_res) - log10_abs(rhs_norm))
-             << ",\"prec\":" << prec << ",\"t\":" << fmt(seconds_since(t0))
+             << ",\"prec\":" << prec << ",\"doubles\":" << nd
+             << ",\"out_of_range\":" << (round_out_of_range - oor0)
+             << ",\"t\":" << fmt(seconds_since(t0))
              << ",\"t_matvec\":" << fmt(t_mv) << ",\"n_matvec\":" << n_mv
              << ",\"t_prec\":" << fmt(t_pc) << ",\"n_prec\":" << n_pc
              << ",\"lres\":" << fmt_vec(lres) << ",\"labs\":" << fmt_vec(labs)
@@ -450,6 +506,8 @@ namespace lab235
     st.pcg_iters = parse_ints(std::getenv("LAB235_PCG_ITERS"), st.spectra_iters);
     st.pcg_phases = parse_ints(std::getenv("LAB235_PCG_PHASES"), {0, 1});
     st.use_max_iters = env_int("LAB235_USE_MAX", 300);
+    st.pcg_doubles = parse_ints(std::getenv("LAB235_PCG_DOUBLES"), {});
+    st.pcg_doubles_stale = env_int("LAB235_PCG_DOUBLES_STALE", 1);
     st.self_control = env_int("LAB235_SELF", 1) != 0;
     st.pcg_max_iters = env_int("LAB235_PCG_MAX", 300);
     st.pcg_floor_bits = env_int("LAB235_FLOOR_BITS", 64);
@@ -624,6 +682,35 @@ namespace lab235
             El::BigFloat(0), x, "measure", s, p_norm);
         if(st.phase == 0)
           st.warm[s] = x;
+      }
+    // reduced-precision runs: P, U_old, rhs and every PCG vector rounded to nd doubles
+    if(measure_here && !st.pcg_doubles.empty()
+       && st.pcg_doubles_stale >= 1
+       && size_t(st.pcg_doubles_stale) <= st.Q_hist.size())
+      {
+        const int s = st.pcg_doubles_stale;
+        for(int nd : st.pcg_doubles)
+          {
+            if(nd <= 0)
+              continue;
+            const long oor0 = round_out_of_range;
+            Block_Matrix Pr(P);
+            for(auto &blk : Pr.blocks)
+              round_mat(blk, nd);
+            El::DistMatrix<El::BigFloat> Ur(st.Q_hist[s - 1]);
+            round_mat(Ur, nd);
+            El::DistMatrix<El::BigFloat> rhs_r(rhs);
+            round_mat(rhs_r, nd);
+            const long oor_inputs = round_out_of_range - oor0;
+            if(is_root())
+              write_line("{\"kind\":\"round_inputs\",\"it\":"
+                         + std::to_string(st.iteration) + ",\"doubles\":"
+                         + std::to_string(nd) + ",\"out_of_range_local\":"
+                         + std::to_string(oor_inputs) + "}");
+            El::DistMatrix<El::BigFloat> x(rhs.Grid());
+            pcg(Pr, work_N, work_P, Ur, rhs_r, x_exact, nullptr,
+                El::BigFloat(0), x, "doubles", s, p_norm, nd);
+          }
       }
     // control: PCG preconditioned by the exact current factor must converge in 1 step
     if(st.self_control && st.iteration <= 2 && st.phase == 0)
