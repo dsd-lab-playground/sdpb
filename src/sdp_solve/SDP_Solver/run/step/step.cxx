@@ -129,7 +129,7 @@ void SDP_Solver::step(
                                        schur_off_diagonal, bigint_syrk_context,
                                        Q, timers, block_timings_ms,
                                        parameters.multimodular_trsm, verbosity);
-    lab235::after_factor(block_info, schur_complement_cholesky, Q);
+    lab235::after_factor(sdp, block_info, schur_complement_cholesky, Q);
 
     // Calculate matrix product -XY
     // It will be reused for mu, R-err, compute_search_direction().
@@ -195,6 +195,7 @@ void SDP_Solver::step(
                         Y_cholesky, timers, Q_cond_number,
                         max_block_cond_number, max_block_cond_number_name);
     lab235::end_step(schur_complement_cholesky, Q);
+    lab235::state().L_now = nullptr;
   }
   // Compute step-lengths that preserve positive definiteness of X, Y
   primal_step_length

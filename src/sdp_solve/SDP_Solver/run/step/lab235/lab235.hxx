@@ -25,6 +25,7 @@
 #include "sdp_solve/Block_Info.hxx"
 #include "sdp_solve/Block_Matrix.hxx"
 #include "sdp_solve/Block_Vector.hxx"
+#include "sdp_solve/SDP.hxx"
 
 #include <El.hpp>
 
@@ -69,6 +70,9 @@ namespace lab235
     std::deque<El::DistMatrix<El::BigFloat>> Q_hist; // newest first
     std::deque<Block_Diagonal_Matrix> S_hist;        // newest first
     std::vector<El::DistMatrix<El::BigFloat>> warm;  // per stale level
+    bool check_BL = false;           // LAB235_CHECK_BL: Q v via B and L as well (timing + agreement)
+    const SDP *sdp = nullptr;                          // set in after_factor for this step
+    const Block_Diagonal_Matrix *L_now = nullptr;      // this step's Schur Cholesky factors
     std::ofstream log;
   };
 
@@ -78,7 +82,7 @@ namespace lab235
   void begin_run();
   void begin_step(const El::BigFloat &primal_error,
                   const El::BigFloat &primal_error_threshold);
-  void after_factor(const Block_Info &block_info,
+  void after_factor(const SDP &sdp, const Block_Info &block_info,
                     const Block_Diagonal_Matrix &schur_complement_cholesky,
                     const El::DistMatrix<El::BigFloat> &Q_chol);
   void end_step(const Block_Diagonal_Matrix &schur_complement_cholesky,

@@ -3,6 +3,8 @@
 #include "lab235.hxx"
 
 #include "sdpb_util/copy_matrix.hxx"
+#include "sdp_solve/SDP_Solver/run/step/compute_search_direction/lower_triangular_solve.hxx"
+#include "sdp_solve/lower_triangular_transpose_solve.hxx"
 
 #include <algorithm>
 #include <chrono>
@@ -145,6 +147,33 @@ namespace lab235
           El::Gemv(El::OrientationNS::TRANSPOSE, El::BigFloat(1),
                    P.blocks[b], work_P.blocks[b], El::BigFloat(0),
                    work_N.blocks[b]);
+        }
+      sum_blocks(work_N, out);
+    }
+
+    // Q_new v = sum_j B_j^T L_j^{-T} L_j^{-1} B_j v without forming P_j = L_j^{-1} B_j
+    // (what an inexact SDPB would do: it skips SDPB's L^{-1} B stage too)
+    void apply_Q_BL(const SDP &sdp, const Block_Diagonal_Matrix &L,
+                    Block_Vector &work_N, Block_Vector &work_P,
+                    const El::DistMatrix<El::BigFloat> &v,
+                    El::DistMatrix<El::BigFloat> &out)
+    {
+      El::DistMatrix<El::BigFloat, El::STAR, El::STAR> v_local(v);
+      El::DistMatrix<El::BigFloat> scratch;
+      for(size_t b = 0; b < work_P.blocks.size(); ++b)
+        {
+          const auto &Bj = sdp.free_var_block(b, scratch);
+          copy_matrix(v_local, work_N.blocks[b]);
+          El::Gemv(El::OrientationNS::NORMAL, El::BigFloat(1), Bj,
+                   work_N.blocks[b], El::BigFloat(0), work_P.blocks[b]);
+        }
+      lower_triangular_solve(L, work_P);
+      lower_triangular_transpose_solve(L, work_P);
+      for(size_t b = 0; b < work_P.blocks.size(); ++b)
+        {
+          const auto &Bj = sdp.free_var_block(b, scratch);
+          El::Gemv(El::OrientationNS::TRANSPOSE, El::BigFloat(1), Bj,
+                   work_P.blocks[b], El::BigFloat(0), work_N.blocks[b]);
         }
       sum_blocks(work_N, out);
     }
@@ -508,6 +537,7 @@ namespace lab235
     st.use_max_iters = env_int("LAB235_USE_MAX", 300);
     st.pcg_doubles = parse_ints(std::getenv("LAB235_PCG_DOUBLES"), {});
     st.pcg_doubles_stale = env_int("LAB235_PCG_DOUBLES_STALE", 1);
+    st.check_BL = env_int("LAB235_CHECK_BL", 1) != 0;
     st.self_control = env_int("LAB235_SELF", 1) != 0;
     st.pcg_max_iters = env_int("LAB235_PCG_MAX", 300);
     st.pcg_floor_bits = env_int("LAB235_FLOOR_BITS", 64);
@@ -579,13 +609,15 @@ namespace lab235
     st.warm.clear();
   }
 
-  void after_factor(const Block_Info &block_info,
+  void after_factor(const SDP &sdp, const Block_Info &block_info,
                     const Block_Diagonal_Matrix &schur_complement_cholesky,
                     const El::DistMatrix<El::BigFloat> &Q_chol)
   {
     if(!enabled())
       return;
     auto &st = state();
+    st.sdp = &sdp;
+    st.L_now = &schur_complement_cholesky;
     if(!want_spectra(st.iteration))
       return;
     if(st.self_control && !st.self_done && !st.Q_hist.empty())
@@ -682,6 +714,33 @@ namespace lab235
             El::BigFloat(0), x, "measure", s, p_norm);
         if(st.phase == 0)
           st.warm[s] = x;
+      }
+    // the two matvec forms on v = rhs: agreement and time
+    if(measure_here && st.check_BL && st.sdp != nullptr && st.L_now != nullptr)
+      {
+        El::DistMatrix<El::BigFloat> q1(rhs.Grid()), q2(rhs.Grid()), dq(rhs.Grid());
+        El::Zeros(q1, rhs.Height(), 1);
+        El::Zeros(q2, rhs.Height(), 1);
+        El::mpi::Barrier(El::mpi::COMM_WORLD);
+        auto t1 = Clock::now();
+        apply_Q(P, work_N, work_P, rhs, q1);
+        El::mpi::Barrier(El::mpi::COMM_WORLD);
+        double tP = seconds_since(t1);
+        t1 = Clock::now();
+        apply_Q_BL(*st.sdp, *st.L_now, work_N, work_P, rhs, q2);
+        El::mpi::Barrier(El::mpi::COMM_WORLD);
+        double tBL = seconds_since(t1);
+        dq = q1;
+        El::Axpy(El::BigFloat(-1), q2, dq);
+        double rel = log10_abs(max_abs(dq)) - log10_abs(max_abs(q1));
+        if(is_root())
+          {
+            std::ostringstream os;
+            os << "{\"kind\":\"matvec\",\"it\":" << st.iteration << ",\"phase\":" << st.phase
+               << ",\"t_P\":" << fmt(tP) << ",\"t_BL\":" << fmt(tBL)
+               << ",\"log10_rel_diff\":" << fmt(rel) << "}";
+            write_line(os.str());
+          }
       }
     // reduced-precision runs: P, U_old, rhs and every PCG vector rounded to nd doubles
     if(measure_here && !st.pcg_doubles.empty()
