@@ -42,6 +42,22 @@ boost::program_options::options_description Solver_Parameters::options()
     "multimodular BLAS. The value is the panel width (e.g. 128, El's "
     "default); 0 (default) uses El::Cholesky.");
   result.add_options()(
+    "qCholeskyRanks",
+    boost::program_options::value<int64_t>(&q_cholesky_ranks)
+      ->default_value(0),
+    "Experimental: compute the Cholesky decomposition of Q on the first N "
+    "ranks only (in node order, so a multiple of the ranks per node gives "
+    "whole nodes); Q is copied there from all ranks. 0 (default): all "
+    "ranks.");
+  result.add_options()(
+    "qSolveRanks",
+    boost::program_options::value<int64_t>(&q_solve_ranks)
+      ->default_value(0),
+    "Experimental: solve with the Cholesky factor of Q on the first N ranks "
+    "only (in node order); the factor is copied there, and dy is summed "
+    "over all ranks and broadcast back. 0 (default): where Q was "
+    "factored.");
+  result.add_options()(
     "sparseB",
     boost::program_options::bool_switch(&sparse_B)->default_value(false),
     "Experimental: store the free variable matrix B with its nonzero "
@@ -192,6 +208,8 @@ boost::property_tree::ptree to_property_tree(const Solver_Parameters &p)
   result.put("findPrimalFeasible", p.find_primal_feasible);
   result.put("multimodularTrsm", p.multimodular_trsm);
   result.put("multimodularCholeskyQ", p.multimodular_cholesky_Q);
+  result.put("qCholeskyRanks", p.q_cholesky_ranks);
+  result.put("qSolveRanks", p.q_solve_ranks);
   result.put("sparseB", p.sparse_B);
   result.put("findDualFeasible", p.find_dual_feasible);
   result.put("detectPrimalFeasibleJump", p.detect_primal_feasible_jump);
@@ -223,6 +241,8 @@ std::ostream &operator<<(std::ostream &os, const Solver_Parameters &p)
      << pretty_print_bytes(p.max_shared_memory_bytes, true) << '\n'
      << "multimodularTrsm             = " << p.multimodular_trsm << '\n'
      << "multimodularCholeskyQ        = " << p.multimodular_cholesky_Q << '\n'
+     << "qCholeskyRanks               = " << p.q_cholesky_ranks << '\n'
+     << "qSolveRanks                  = " << p.q_solve_ranks << '\n'
      << "sparseB                      = " << p.sparse_B << '\n'
      << "findPrimalFeasible           = " << p.find_primal_feasible << '\n'
      << "findDualFeasible             = " << p.find_dual_feasible << '\n'

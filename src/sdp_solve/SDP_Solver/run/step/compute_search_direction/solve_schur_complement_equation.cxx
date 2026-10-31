@@ -4,6 +4,7 @@
 #include "sdpb_util/copy_matrix.hxx"
 #include "sdpb_util/Timers/Timers.hxx"
 
+#include <cstdlib>
 #include <optional>
 
 // Solve the Schur complement equation for dx, dy.
@@ -33,6 +34,66 @@ void solve_schur_complement_equation(
   begin("L_solve");
   lower_triangular_solve(schur_complement_cholesky, dx);
   begin("dy_sum");
+
+  // lab #143: if Q lives on a sub-grid of the ranks (--qSolveRanks,
+  // --qCholeskyRanks), or SDPB_DY_ALLREDUCE=1, sum dy over all ranks by one
+  // AllReduce, solve on Q's grid and broadcast the result from rank 0.
+  // (Otherwise, as before: QueueUpdate/ProcessQueues to Q's [MC,MR] owners.)
+  static const bool dy_allreduce_env = [] {
+    const char *env = std::getenv("SDPB_DY_ALLREDUCE");
+    return env != nullptr && env[0] == '1';
+  }();
+  if(dy_allreduce_env || Q.Grid() != El::Grid::Default())
+    {
+      El::Matrix<El::BigFloat> dy_sum;
+      Zeros(dy_sum, Q.Height(), 1);
+      for(size_t block = 0; block < schur_off_diagonal.blocks.size(); ++block)
+        {
+          Gemv(El::OrientationNS::TRANSPOSE, El::BigFloat(-1),
+               schur_off_diagonal.blocks[block], dx.blocks[block],
+               El::BigFloat(1), dy.blocks[block]);
+          for(int64_t row = 0; row < dy.blocks[block].LocalHeight(); ++row)
+            {
+              const int64_t global_row(dy.blocks[block].GlobalRow(row));
+              for(int64_t column = 0;
+                  column < dy.blocks[block].LocalWidth(); ++column)
+                dy_sum(global_row, dy.blocks[block].GlobalCol(column))
+                  += dy.blocks[block].GetLocal(row, column);
+            }
+        }
+      begin("dy_allreduce");
+      El::mpi::AllReduce(dy_sum.Buffer(), dy_sum.Height(), El::mpi::SUM,
+                         El::mpi::COMM_WORLD);
+      if(Q.Participating())
+        {
+          begin("Q_solve");
+          El::DistMatrix<El::BigFloat> dy_dist(Q.Grid());
+          dy_dist.Resize(Q.Height(), 1);
+          copy_matrix(dy_sum, dy_dist);
+          El::cholesky::SolveAfter(El::UpperOrLowerNS::UPPER,
+                                   El::OrientationNS::NORMAL, Q, dy_dist);
+          begin("dy_star_star");
+          El::DistMatrix<El::BigFloat, El::STAR, El::STAR> dy_star_star(
+            dy_dist);
+          if(El::mpi::Rank() == 0)
+            dy_sum = dy_star_star.Matrix();
+        }
+      begin("dy_bcast");
+      El::mpi::Broadcast(dy_sum.Buffer(), dy_sum.Height(), 0,
+                         El::mpi::COMM_WORLD);
+      begin("dx_update");
+      for(size_t block = 0; block < schur_off_diagonal.blocks.size(); ++block)
+        {
+          copy_matrix(dy_sum, dy.blocks[block]);
+          Gemv(El::OrientationNS::NORMAL, El::BigFloat(1),
+               schur_off_diagonal.blocks[block], dy.blocks[block],
+               El::BigFloat(1), dx.blocks[block]);
+        }
+      begin("LT_solve");
+      lower_triangular_transpose_solve(schur_complement_cholesky, dx);
+      phase.reset();
+      return;
+    }
 
   El::DistMatrix<El::BigFloat> dy_dist;
   Zeros(dy_dist, Q.Height(), 1);

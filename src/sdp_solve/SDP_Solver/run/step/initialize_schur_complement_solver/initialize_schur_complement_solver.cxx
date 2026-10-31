@@ -4,6 +4,7 @@
 #include "sdp_solve/SDP_Solver/run/bigint_syrk/BigInt_Shared_Memory_Syrk_Context.hxx"
 #include "sdp_solve/memory_estimates.hxx"
 #include "sdp_solve/SDP_Solver/run/multimodular/multimodular_blas.hxx"
+#include "sdp_solve/SDP_Solver/run/step/Q_Grids.hxx"
 
 #include <cstdlib>
 
@@ -75,8 +76,49 @@ void initialize_schur_complement_solver(
   Block_Matrix &schur_off_diagonal,
   BigInt_Shared_Memory_Syrk_Context &bigint_syrk_context,
   El::DistMatrix<El::BigFloat> &Q, Timers &timers,
+  El::Matrix<int32_t> &block_timings_ms, bool multimodular_trsm,
+  int64_t multimodular_cholesky_Q, Verbosity verbosity,
+  const Q_Grids *q_grids);
+
+void initialize_schur_complement_solver(
+  const Environment &env, const Block_Info &block_info, const SDP &sdp,
+  const std::array<
+    std::vector<std::vector<std::vector<El::DistMatrix<El::BigFloat>>>>, 2>
+    &A_X_inv,
+  const std::array<
+    std::vector<std::vector<std::vector<El::DistMatrix<El::BigFloat>>>>, 2>
+    &A_Y,
+  const El::Grid &group_grid, Block_Diagonal_Matrix &schur_complement_cholesky,
+  Block_Matrix &schur_off_diagonal,
+  BigInt_Shared_Memory_Syrk_Context &bigint_syrk_context,
+  El::DistMatrix<El::BigFloat> &Q, Timers &timers,
   El::Matrix<int32_t> &block_timings_ms, const bool multimodular_trsm,
   const int64_t multimodular_cholesky_Q, const Verbosity verbosity)
+{
+  initialize_schur_complement_solver(
+    env, block_info, sdp, A_X_inv, A_Y, group_grid, schur_complement_cholesky,
+    schur_off_diagonal, bigint_syrk_context, Q, timers, block_timings_ms,
+    multimodular_trsm, multimodular_cholesky_Q, verbosity, nullptr);
+}
+
+// q_grids (lab #143, may be nullptr): factor Q on q_grids->cholesky_grid()
+// and leave the factor on q_grids->solve_grid(). On return Q is a matrix on
+// that grid; ranks outside it hold no part of Q.
+void initialize_schur_complement_solver(
+  const Environment &env, const Block_Info &block_info, const SDP &sdp,
+  const std::array<
+    std::vector<std::vector<std::vector<El::DistMatrix<El::BigFloat>>>>, 2>
+    &A_X_inv,
+  const std::array<
+    std::vector<std::vector<std::vector<El::DistMatrix<El::BigFloat>>>>, 2>
+    &A_Y,
+  const El::Grid &group_grid, Block_Diagonal_Matrix &schur_complement_cholesky,
+  Block_Matrix &schur_off_diagonal,
+  BigInt_Shared_Memory_Syrk_Context &bigint_syrk_context,
+  El::DistMatrix<El::BigFloat> &Q, Timers &timers,
+  El::Matrix<int32_t> &block_timings_ms, const bool multimodular_trsm,
+  const int64_t multimodular_cholesky_Q, const Verbosity verbosity,
+  const Q_Grids *q_grids)
 {
   Scoped_Timer initialize_timer(timers, "initializeSchurComplementSolver");
   // The Schur complement matrix S: a Block_Diagonal_Matrix with one
@@ -97,10 +139,25 @@ void initialize_schur_complement_solver(
             schur_complement_cholesky, bigint_syrk_context, Q, timers,
             block_timings_ms, multimodular_trsm, verbosity);
 
+  // Move Q to the grid where it is factored (lab #143)
+  auto move_Q_to = [&Q, &timers](const El::Grid &grid, const char *name) {
+    Scoped_Timer timer(timers, name);
+    El::DistMatrix<El::BigFloat> Q_new(grid);
+    Q_new = Q;
+    Q.Empty();
+    Q = std::move(Q_new);
+  };
+  if(q_grids != nullptr && q_grids->cholesky_grid() != nullptr)
+    move_Q_to(*q_grids->cholesky_grid(), "Q_to_cholesky_grid");
+
   Scoped_Timer Cholesky_timer(timers, "Cholesky_Q");
   try
     {
-      if(multimodular_cholesky_Q > 0)
+      if(!Q.Participating())
+        {
+          // Q is on a sub-grid without this rank
+        }
+      else if(multimodular_cholesky_Q > 0)
         {
           // lab #226 prototype; SDPB_MMQ_DIAG=1: diagonal blocks by
           // multimodular_cholesky_lower too
@@ -118,4 +175,8 @@ void initialize_schur_complement_solver(
     {
       RUNTIME_ERROR("Error when computing Cholesky(Q): ", e.what());
     }
+  Cholesky_timer.stop();
+
+  if(q_grids != nullptr && q_grids->solve_grid() != nullptr)
+    move_Q_to(*q_grids->solve_grid(), "Q_to_solve_grid");
 }

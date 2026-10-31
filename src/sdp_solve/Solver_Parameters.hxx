@@ -22,6 +22,10 @@ struct Solver_Parameters
   // Experimental (lab #226): Cholesky of Q with the trailing update by
   // multimodular BLAS, panel width = this value (0: El::Cholesky)
   int64_t multimodular_cholesky_Q = 0;
+  // Experimental (lab #143): number of ranks for Cholesky(Q) and for the
+  // Q solves (0: all ranks; solves: the Cholesky grid), see
+  // sdp_solve/SDP_Solver/run/step/Q_Grids.hxx
+  int64_t q_cholesky_ranks = 0, q_solve_ranks = 0;
   // Experimental (lab #164): store the free variable matrix B compactly
   // (nonzero elements only), see sdp_solve/Sparse_Block_Matrix.hxx
   bool sparse_B = false;

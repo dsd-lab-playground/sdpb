@@ -3,6 +3,7 @@
 #include "bigint_syrk/BigInt_Shared_Memory_Syrk_Context.hxx"
 #include "bigint_syrk/initialize_bigint_syrk_context.hxx"
 #include "sdp_solve/SDP_Solver.hxx"
+#include "step/Q_Grids.hxx"
 #include "sdpb_util/ostream/pretty_print_bytes.hxx"
 
 #include <boost/date_time/posix_time/posix_time.hpp>
@@ -254,6 +255,10 @@ SDP_Solver_Terminate_Reason SDP_Solver::run(
     env, block_info, sdp, max_shared_memory_bytes, verbosity);
   initialize_bigint_syrk_context_timer.stop();
 
+  // lab #143: optional sub-grids for Cholesky(Q) and the Q solves
+  const Q_Grids q_grids(env, parameters.q_cholesky_ranks,
+                        parameters.q_solve_ranks);
+
   initialize_timer.stop();
   auto last_checkpoint_time(std::chrono::high_resolution_clock::now());
 
@@ -428,7 +433,8 @@ SDP_Solver_Terminate_Reason SDP_Solver::run(
       El::BigFloat max_block_cond_number;
       std::string max_block_cond_number_name;
       step(env, parameters, verbosity, total_psd_rows,
-           is_primal_and_dual_feasible, block_info, sdp, grid, X_cholesky,
+           is_primal_and_dual_feasible, block_info, sdp, grid, &q_grids,
+           X_cholesky,
            Y_cholesky, A_X_inv, A_Y, primal_residue_p, bigint_syrk_context, mu,
            beta_corrector, primal_step_length, dual_step_length, terminate_now,
            timers, block_timings_ms, Q_cond_number, max_block_cond_number,
